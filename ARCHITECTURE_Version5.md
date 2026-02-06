@@ -37,58 +37,6 @@ flowchart TD
     style G fill:#e0f2f1
     style H fill:#ede7f6
 ```
-I see the issue. You've provided an updated **ARCHITECTURE.md** with a more refined diagram and structure. Let me acknowledge what you've shared and provide the complete deliverables tailored to your revised version.
-
-Let me continue with the remaining files (Roadmap, Compliance, and IaC) aligned with your improved architecture:Perfect! Now let me continue with the complete package—I'll create the GitHub issues from the roadmap and finalize all the IaC files:Perfect! Now I'll create the GitHub issues from the roadmap directly in your repository:Perfect! Now I understand your question. Let me create the **12 GitHub Issues** from the roadmap in proper format:Perfect! Now I understand you want a **unified, production-ready** ARCHITECTURE.md with both visual diagrams **and** detailed textual explanations. Let me consolidate and provide the complete set of deliverables for your repo, ready to push.
-
----
-
-## **Complete Deliverables (Ready for Repo)**
-
-I'll now provide all the files in the order they should be committed:
-
-### **1. Enhanced ARCHITECTURE.md (with diagram + detailed content)**
-
-```markdown name=ARCHITECTURE.md
-# GenAI Log Analyzer – System Architecture
-
-> A serverless, cloud-native log analysis platform combining real-time stream processing with generative AI insights for **telecom and banking** scale operations.
-
-## Table of Contents
-- [System Diagram](#system-diagram)
-- [Component Responsibilities](#component-responsibilities)
-- [Data Flow](#data-flow)
-- [Scaling Strategy](#scaling-strategy)
-- [Security & Compliance](#security--compliance)
-- [Deployment & Operations](#deployment--operations)
-- [References](#references)
-
----
-
-## System Diagram
-
-```mermaid
-flowchart TD
-    A["Log Sources<br/>(Network, Apps, Security)"] -->|"Syslog, JSON, CEF"| B["Kafka<br/>(High-Throughput Ingestion)"]
-    B -->|"Partitioned by source/severity"| C["Stream Processing<br/>(PySpark / Flink)"]
-    C -->|"Parsed, enriched, deduplicated"| D1["Delta Lake / Iceberg<br/>(ACID Storage, Time-Travel)"]
-    C -->|"Batch embeddings"| D2["Vector DB<br/>(Chroma / Weaviate)"]
-    D1 -->|"Periodic sync / CDC"| D2
-    D2 -->|"Semantic retrieval"| E["GenAI Engine<br/>(LangChain + Gemini)"]
-    E -->|"Natural language queries, anomaly detection"| F["FastAPI<br/>(Cloud Run, Serverless)"]
-    F -->|"OAuth2, rate limiting, audit"| G["Query Interface<br/>(Web/CLI)"]
-    F -->|"Metrics, traces, audit logs"| H["Observability<br/>(LangSmith, Cloud Logging, Kibana)"]
-    H -->|"Feedback, model updates"| E
-    style A fill:#e1f5ff
-    style B fill:#fff3e0
-    style C fill:#f3e5f5
-    style D1 fill:#e8f5e9
-    style D2 fill:#fce4ec
-    style E fill:#fff9c4
-    style F fill:#f1f8e9
-    style G fill:#e0f2f1
-    style H fill:#ede7f6
-```
 
 **Key Properties:**
 - **Throughput**: 100 MB/s – 10 GB/s (Kafka → Spark → Storage)
