@@ -11,3 +11,54 @@ A key component of this project is the fully automated **Continuous Integration/
 This project goes beyond a simple proof of concept, serving as a comprehensive demonstration of skills in **containerization, MLOps, CI/CD, and the application of Generative AI** in a practical, real-world context.
 
 Note: _While currently serverless and lightweight, this architecture is designed to integrate with large-scale data pipelines (e.g., Kafka + Spark) for high-throughput log processing in telecom and financial services._
+
+## System Architecture
+
+```mermaid
+graph TB
+    LogSources[" Log Sources<br/>(Network Devices, Apps, Firewalls)"]
+    Kafka[" Real-Time Ingestion<br/>(Apache Kafka)"]
+    StreamProc[" Stream Processing<br/>(PySpark Structured Streaming<br/>or Apache Flink)"]
+    DeltaLake[" Storage<br/>(Delta Lake / Iceberg)<br/>ACID-compliant"]
+    VectorDB[" Vector Database<br/>(Chroma / Weaviate)<br/>Embeddings & Semantic Search"]
+    GenAI[" GenAI Analysis Engine<br/>(LangChain + Gemini/LLM)"]
+    API[" API & Query Interface<br/>(FastAPI on Cloud Run)"]
+    Observability[" Observability & Audit<br/>(LangSmith, Kibana, Logs)"]
+    
+    LogSources -->|High-throughput| Kafka
+    Kafka -->|Stream data| StreamProc
+    StreamProc -->|Parse & filter| DeltaLake
+    StreamProc -->|Log embeddings| VectorDB
+    DeltaLake <-->|ACID reads/writes| GenAI
+    VectorDB -->|Semantic search| GenAI
+    GenAI -->|Results & insights| API
+    API -->|Queries & logs| Observability
+    StreamProc -->|Metrics & lineage| Observability
+```
+
+## Key Features
+
+- **Scalable**: Kafka + Spark handle terabytes/day
+- **Secure**: PII masking, RBAC, encrypted storage
+- **Compliant**: Append-only storage, audit trails, data lineage (banking/telecom)
+- **Intelligent**: Natural language queries, anomaly detection, summarization via GenAI
+- **Serverless**: Auto-scaling FastAPI on Cloud Run; minimal ops overhead
+
+---
+
+## Architecture Overview
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed component responsibilities, data flow, scaling strategies, and security controls.
+
+---
+
+## Quick Start
+
+(To be completed)
+
+---
+
+## Contributing
+
+(To be completed)
+```
