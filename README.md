@@ -61,4 +61,3 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed component responsibilities
 ## Contributing
 
 (To be completed)
-```
