@@ -1,0 +1,22 @@
+profiles:
+  general:
+    entities: ["PERSON", "EMAIL_ADDRESS", "IP_ADDRESS", "LOCATION"]
+    score_threshold: 0.4
+  
+  financial:
+    entities: ["PERSON", "EMAIL_ADDRESS", "IP_ADDRESS", "CREDIT_CARD", "PHONE_NUMBER"]
+    score_threshold: 0.5
+    custom_recognizers:
+      - name: "cc_pattern"
+        entity: "CREDIT_CARD"
+        regex: "\\b(?:\\d[ -]*?){13,16}\\b"
+        score: 0.8
+      - name: "phone_pattern"
+        entity: "PHONE_NUMBER"
+        regex: "(\\+?\\d{1,3}[-.\\s]?)?\\(?\\d{3}\\)?[-.\\s]?\\d{3}[-.\\s]?\\d{4}"
+        score: 0.7
+
+  medical:
+    entities: ["PERSON", "EMAIL_ADDRESS", "MEDICAL_LICENSE", "US_SSN", "DATE_TIME"]
+    score_threshold: 0.3
+    # In production, this would also include a specialized NLP model like 'en_core_sci_sm'

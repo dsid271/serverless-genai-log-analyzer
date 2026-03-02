@@ -54,10 +54,75 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed component responsibilities
 
 ## Quick Start
 
-(To be completed)
+### 1. Installation
+This project uses `uv` for lightning-fast dependency management.
+```powershell
+uv sync
+uv run python -m spacy download en_core_web_sm
+```
+
+### 2. Environment Setup
+Create a `.env` file in the root:
+```env
+GEMINI_API_KEY=your_key_here
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+LOG_TOPIC=logs-raw
+```
+
+### 2. Running the API
+```powershell
+uv run uvicorn api.main:app --reload
+```
 
 ---
 
-## Contributing
+## Advanced PII Redaction
 
-(To be completed)
+The system uses a **Profile-Driven Hybrid Redaction Engine**. This allows it to adapt to different industries (Financial, Medical, etc.) without code changes.
+
+### Configuration (`processing/pii_profiles.yaml`)
+> [!NOTE]
+> The included `pii_profiles.yaml` serves as a **template and example**. In a real production environment, this should be expanded with specialized patterns (SSNs, Passport IDs, etc.) relevant to the client's industry.
+
+You can define entities, confidence thresholds, and custom Regex patterns in the profiles file:
+```yaml
+profiles:
+  financial:
+    entities: ["CREDIT_CARD", "PHONE_NUMBER", "EMAIL_ADDRESS"]
+    custom_recognizers:
+      - name: "cc_pattern"
+        regex: "\\b(?:\\d[ -]*?){13,16}\\b"
+        score: 0.8
+```
+
+### Deployment Customization (The "Tech Guy" Option)
+Clients can inject their own PII rules at runtime using Docker volumes. No rebuilding required:
+```yaml
+# docker-compose.yml example
+services:
+  api:
+    volumes:
+      - ./my_custom_profiles.yaml:/app/processing/pii_profiles.yaml
+```
+
+---
+
+## Real-Time Ingestion (Kafka)
+
+The system includes an asynchronous Kafka consumer that processes logs at scale.
+
+- **Background Worker**: Managed via FastAPI `lifespan` events.
+- **Fail-Safe**: The API remains operational even if the Kafka broker is offline (Graceful Degradation).
+- **Manual Ingestion**: A `/ingest` POST endpoint is available for batch log uploads.
+
+To test the consumer locally:
+1. Start Kafka via Docker: `docker compose up -d`
+2. Run the API (Consumer starts automatically): `uv run uvicorn api.main:app --reload`
+
+---
+
+## Testing the Redactor
+Run the included test suite to verify different profiles:
+```powershell
+uv run test_redactor.py
+```

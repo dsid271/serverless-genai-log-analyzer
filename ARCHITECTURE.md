@@ -203,10 +203,12 @@ errors_per_service = parsed_df \
 - **Vector DB** (for semantic search)
 - **Kafka** (to Kibana dashboards in real time)
 
-**Deployment**:
-- **Kubernetes**: Spark Structured Streaming job (auto-scaling pods)
-- **Google Cloud Dataflow**: Managed PySpark job
-- **Apache Flink**: For complex CEP (Complex Event Processing)
+**Current Implementation**:
+- **LogConsumer (`ingestion/kafka_consumer.py`)**: An asynchronous `aiokafka` worker that runs as a background task within the FastAPI application.
+- **Enricher (`processing/enricher.py`)**: Performs PII redaction using the `LogRedactor` before logs reach storage.
+
+**Future/Scale-Out Plan**:
+- **Apache Flink / Spark**: Migrate the consumption logic to dedicated stream processors for multi-terabyte scale.
 
 **Monitoring**:
 - **Latency**: End-to-end from Kafka ingest to Delta Lake write (<5s)

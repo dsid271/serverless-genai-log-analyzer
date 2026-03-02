@@ -1,0 +1,23 @@
+[
+    {
+        "type": "websock_access",
+        "message": "192.168.1.45 - - [06/Feb/2026:14:23:45 +0000] \"POST /auth/login HTTP/1.1\" 200 512 \"-\" \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\" user_email=\"victim@hacker.com\"",
+        "source": "nginx-proxy"
+    },
+    {
+        "type": "banking_transaction",
+        "message": "Transaction failed for customer_id: 8827361. Reason: Insufficient funds. Initiated from IP 203.0.113.19. Secondary factor sent to +1-555-098-7654.",
+        "customer_id": "8827361",
+        "severity": "ERROR"
+    },
+    {
+        "type": "syslog_security",
+        "message": "Feb 6 14:25:01 web-server-01 sshd[12345]: Failed password for root from 185.156.177.214 port 54321 ssh2",
+        "source": "ssh-daemon"
+    },
+    {
+        "type": "pci_audit",
+        "message": "Audit log: Credit card validation successful for card ending in 4111-2222-3333-4444. User: jane_doe_finance",
+        "user_id": "jane_doe_finance"
+    }
+]
