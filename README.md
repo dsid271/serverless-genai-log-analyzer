@@ -76,6 +76,103 @@ uv run uvicorn api.main:app --reload
 
 ---
 
+## Docker (Plug-and-Play)
+
+This project can be built as a single container image that clients can run locally and then deploy to Cloud Run.
+
+### Build-time modularity (Docker build args)
+
+The Dockerfile supports a module-set switch:
+
+```powershell
+docker build -t genai-log-analyzer --build-arg MODULE_SET=minimal .
+```
+
+- **`MODULE_SET=minimal`**: boots the API with null fallbacks (no Kafka/vector/PII/LLM dependencies).
+- **`MODULE_SET=full`**: includes the full dependency set.
+
+The module-set requirements live under:
+- `requirements/minimal.txt`
+- `requirements/full.txt`
+
+### Runtime modularity (env vars)
+
+Modules are activated at runtime via env vars:
+
+- **`ENABLED_CONNECTORS`**: `kafka`
+- **`ENABLED_DETECTORS`**: `error_spike`
+- **`ENABLED_ANALYZERS`**: `simple_summary`
+
+Plugin loading:
+- **`PLUGINS_DIR`**: directory added to `sys.path` for plugin modules (default: `/app/plugins`)
+- **`PLUGIN_MODULES`**: comma-separated Python module names to import; each module may define `register(registry)`
+
+Example (run detector + analyzer locally):
+
+```powershell
+docker run -p 8001:8000 \
+  -e ENABLED_DETECTORS=error_spike \
+  -e ENABLED_ANALYZERS=simple_summary \
+  -e ERROR_SPIKE_THRESHOLD=5 \
+  genai-log-analyzer
+```
+
+Validation endpoints:
+- `GET /plugins`
+- `GET /incidents`
+
+### Proactive detector tuning (error spike)
+
+The built-in `error_spike` detector raises an incident when it sees a spike of `ERROR`/`CRITICAL` logs.
+
+Env vars:
+- **`ERROR_SPIKE_THRESHOLD`**: number of error events required to raise an incident
+- **`ERROR_SPIKE_WINDOW_SECONDS`**: sliding window for counting errors
+- **`ERROR_SPIKE_COOLDOWN_SECONDS`**: minimum seconds between incidents (dedup); set to `0` to disable cooldown
+
+### Incident analyzers
+
+Analyzers run only when an incident is raised (to keep cost low). Enable them via `ENABLED_ANALYZERS`.
+
+Built-ins:
+- **`simple_summary`**: lightweight deterministic summary (no external deps)
+- **`gemini_triage`**: optional LLM triage output (requires `GEMINI_API_KEY` and full deps)
+
+### Extending with client modules (derived image)
+
+Clients can extend the base image by building a derived image:
+
+```dockerfile
+FROM genai-log-analyzer:latest
+COPY client_plugins/ /app/plugins/
+ENV PLUGIN_MODULES=client_plugin_entry
+```
+
+The module entry must expose a callable `register(registry)` function.
+
+This repo includes an example plugin module you can load immediately:
+- `plugins/example_client_module.py` (registers analyzer `client_tag`)
+
+Run it locally:
+
+```powershell
+docker run -p 8001:8000 \
+  -e ENABLED_DETECTORS=error_spike \
+  -e ENABLED_ANALYZERS=simple_summary,client_tag \
+  -e PLUGIN_MODULES=example_client_module \
+  -e ERROR_SPIKE_THRESHOLD=5 \
+  genai-log-analyzer
+```
+
+---
+
+## Dependency management note (uv vs Docker)
+
+- **Local dev** uses `pyproject.toml` via `uv`.
+- **Docker builds** use `requirements/<MODULE_SET>.txt` to keep images lightweight.
+
+---
+
 ## Advanced PII Redaction
 
 The system uses a **Profile-Driven Hybrid Redaction Engine**. This allows it to adapt to different industries (Financial, Medical, etc.) without code changes.

@@ -1,25 +1,38 @@
-from typing import List, Dict, Any
-from engine.analyzer import LogAnalysisEngine
-from processing.enricher import LogEnricher
-from storage.lake_mock import DeltaLakeStorage
-from vector_db.store import VectorStore
+from typing import List, Dict, Any, Optional
 
 class SystemOrchestrator:
     """
     Connects all modules: Ingestion -> Processing -> Storage -> Engine.
+    Now Uses Dependency Injection for High Modularity.
     """
-    def __init__(self, gemini_api_key: str):
-        self.enricher = LogEnricher()
-        self.storage = DeltaLakeStorage()
-        self.vector_store = VectorStore()
-        self.engine = LogAnalysisEngine(gemini_api_key)
+    def __init__(
+        self, 
+        enricher,
+        storage,
+        vector_store,
+        engine,
+        event_bus: Optional[object] = None
+    ):
+        self.enricher = enricher
+        self.storage = storage
+        self.vector_store = vector_store
+        self.engine = engine
+        self.event_bus = event_bus
 
     async def ingest_single_log(self, raw_log: Dict[str, Any]):
         """Runs a single log through the full pipeline."""
         # 1. Process (Redact & Enrich)
         processed_log = self.enricher.process_log(raw_log)
+
+        if self.event_bus is not None:
+            publish = getattr(self.event_bus, "publish", None)
+            if callable(publish):
+                try:
+                    await publish(processed_log)
+                except Exception:
+                    pass
         
-        # 2. Save to Delta Lake (Async in the future, currently mock sync)
+        # 2. Save to Delta Lake (ACID Transaction)
         self.storage.save_logs([processed_log])
         
         # 3. Index in Vector DB

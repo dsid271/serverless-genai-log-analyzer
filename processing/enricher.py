@@ -1,12 +1,21 @@
-from typing import Dict, Any
-from processing.redactor import LogRedactor
+from typing import Dict, Any, Optional, Any as AnyType
 
 class LogEnricher:
     """
     Simulates enrichment (GeoIP, Threat Intel) for log entries.
+    Now supports injectable redactors for high modularity.
     """
-    def __init__(self):
-        self.redactor = LogRedactor()
+    def __init__(self, redactor: Optional[AnyType] = None):
+        if redactor is not None:
+            self.redactor = redactor
+            return
+
+        try:
+            from processing.redactor import LogRedactor as DefaultRedactor
+        except Exception:
+            from processing.redactor_null import LogRedactor as DefaultRedactor
+
+        self.redactor = DefaultRedactor()
 
     def process_log(self, log_entry: Dict[str, Any]) -> Dict[str, Any]:
         """

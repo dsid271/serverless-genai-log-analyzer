@@ -1,0 +1,14 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite
+*.parquet
+*.delta
+*.bin
+*.zip
+.env

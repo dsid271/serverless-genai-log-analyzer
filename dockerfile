@@ -1,14 +1,20 @@
-# Dockerfile
-FROM python:3.10-slim
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+ARG MODULE_SET=full
 
-COPY . .
+COPY requirements /app/requirements
 
-# Use port 8080 as required by Cloud Run
-EXPOSE 8080
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir -r /app/requirements/${MODULE_SET}.txt
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+COPY . /app
+
+ENV HOST=0.0.0.0
+ENV PORT=8000
+
+CMD ["sh", "-c", "uvicorn api.main:app --host ${HOST} --port ${PORT}"]

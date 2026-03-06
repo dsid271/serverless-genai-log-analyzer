@@ -1,8 +1,6 @@
 import asyncio
 import json
 import logging
-from aiokafka import AIOKafkaConsumer
-from processing.redactor import LogRedactor
 from typing import Optional, Callable, Dict, Any
 
 # Configure basic logging
@@ -24,14 +22,26 @@ class LogConsumer:
         self.topic = topic
         self.bootstrap_servers = bootstrap_servers
         self.group_id = group_id
-        self.redactor = LogRedactor(profile=redactor_profile)
-        self.consumer: Optional[AIOKafkaConsumer] = None
+        try:
+            from processing.redactor import LogRedactor as DefaultRedactor
+        except Exception:
+            from processing.redactor_null import LogRedactor as DefaultRedactor
+
+        self.redactor = DefaultRedactor(profile=redactor_profile)
+        self.consumer: Optional[Any] = None
         self._running = False
 
     async def start(self, on_message_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         """
         Starts the Kafka consumer loop with graceful failure.
         """
+        try:
+            from aiokafka import AIOKafkaConsumer
+        except Exception as e:
+            logger.error(f"Kafka ingestion is not available (aiokafka not installed): {e}")
+            logger.warning("API will run without real-time Kafka ingestion.")
+            return
+
         self.consumer = AIOKafkaConsumer(
             self.topic,
             bootstrap_servers=self.bootstrap_servers,

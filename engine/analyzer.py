@@ -18,10 +18,10 @@ class AgentState(TypedDict):
 class LogAnalysisEngine:
     """
     Orchestrates the multi-agent RAG workflow via LangGraph.
-    Includes: Retrieval, Grading, and Generation nodes.
+    Now supports an injectable VectorStore for high modularity.
     """
-    def __init__(self, gemini_api_key: str):
-        self.vector_store = VectorStore()
+    def __init__(self, gemini_api_key: str, vector_store: VectorStore):
+        self.vector_store = vector_store
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=gemini_api_key)
         self.workflow = self._create_workflow()
 
