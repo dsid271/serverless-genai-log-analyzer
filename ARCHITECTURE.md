@@ -2,6 +2,10 @@
 
 > A serverless, cloud-native log analysis platform combining real-time stream processing with generative AI insights for **telecom and banking** scale operations.
 
+## Implementation Status
+
+This document describes the target architecture. **The current repository implements a lightweight MVP** (FastAPI + modular plugins + optional Kafka connector + proactive detectors + incident analyzers). The **Spark/Flink streaming layer is a planned scale-out step** and is not implemented in this codebase yet.
+
 ## Table of Contents
 - [System Diagram](#system-diagram)
 - [Component Responsibilities](#component-responsibilities)

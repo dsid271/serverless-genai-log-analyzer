@@ -3,6 +3,8 @@
 ## Overview
 This checklist covers PCI-DSS (payment processing), GDPR (EU data privacy), SOC 2 Type II (auditing), and telecom/banking best practices.
 
+Note: This repository currently ships an MVP FastAPI service with modular plugins. Items referencing Spark/Flink/large-scale pipelines are part of the planned scale-out architecture and are included here as forward-looking controls.
+
 ---
 
 ## 1. Data Classification & PII Management
@@ -39,7 +41,7 @@ This checklist covers PCI-DSS (payment processing), GDPR (EU data privacy), SOC 
 
 ### Encryption in Transit (TLS 1.3)
 - [ ] **Kafka**: SASL/SSL for producer/consumer
-- [ ] **Spark → Delta Lake**: encrypted channel
+- [ ] **Spark → Delta Lake**: encrypted channel (future scale-out)
 - [ ] **API (FastAPI)**: HTTPS only, TLS 1.3 minimum
 - [ ] **Vector DB**: encrypted connection
 - [ ] **Database**: encrypted channels, no unencrypted backups

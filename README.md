@@ -10,7 +10,15 @@ A key component of this project is the fully automated **Continuous Integration/
 
 This project goes beyond a simple proof of concept, serving as a comprehensive demonstration of skills in **containerization, MLOps, CI/CD, and the application of Generative AI** in a practical, real-world context.
 
-Note: _While currently serverless and lightweight, this architecture is designed to integrate with large-scale data pipelines (e.g., Kafka + Spark) for high-throughput log processing in telecom and financial services._
+Note: _This repo currently implements a lightweight, serverless FastAPI service with modular plugins (connectors/detectors/analyzers). Spark/Flink are part of the **future scale-out plan** and are not implemented in this codebase yet._
+
+## Implemented Now (MVP)
+
+- **FastAPI API** with `/ingest`, `/analyze`, `/plugins`, `/incidents`
+- **Modular plugin system** via `ENABLED_CONNECTORS`, `ENABLED_DETECTORS`, `ENABLED_ANALYZERS`
+- **Plugin loading** via `PLUGIN_MODULES` (derived-image friendly)
+- **Proactive detection** (`error_spike`) and **incident store** with attached analyzer outputs
+- **Docker module sets** (`MODULE_SET=minimal|full`) for lightweight base images
 
 ## System Architecture
 
@@ -38,7 +46,7 @@ graph TB
 
 ## Key Features
 
-- **Scalable**: Kafka + Spark handle terabytes/day
+- **Scalable path**: designed to scale out to Kafka + Spark/Flink for terabytes/day (future)
 - **Secure**: PII masking, RBAC, encrypted storage
 - **Compliant**: Append-only storage, audit trails, data lineage (banking/telecom)
 - **Intelligent**: Natural language queries, anomaly detection, summarization via GenAI
