@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Depends
 from api.orchestrator import SystemOrchestrator
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -12,6 +12,14 @@ from core.event_bus import EventBus
 from core.incident_store import IncidentStore
 from core.analyzer_runner import AnalyzerRunner
 
+import structlog
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+
+from api.auth import require_role, User
+from api.rate_limit import limiter, rate_limit_default, rate_limit_ingest, rate_limit_analyze
+from api.middleware import AuditLoggingMiddleware
+from api.audit import audit_logger
 load_dotenv()
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -134,6 +142,14 @@ _analyzer_runner: Optional[AnalyzerRunner] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- STARTUP ---
+    structlog.configure(
+        processors=[
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.JSONRenderer(),
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+    )
+    
     global _running_connectors, _running_detectors, _analyzer_runner
 
     enabled_connectors = _env_csv("ENABLED_CONNECTORS")
@@ -213,6 +229,10 @@ app = FastAPI(
 
 app.state.plugin_registry = plugin_registry
 app.state.incident_store = incident_store
+app.state.limiter = limiter
+
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(AuditLoggingMiddleware)
 
 class LogIngestRequest(BaseModel):
     logs: List[Dict[str, Any]]
@@ -221,14 +241,16 @@ class AnalysisRequest(BaseModel):
     query: str
 
 @app.post("/ingest", tags=["Ingestion"])
-async def ingest_logs(request: LogIngestRequest):
+@limiter.limit(rate_limit_ingest)
+async def ingest_logs(request: Request, body: LogIngestRequest, user: User = Depends(require_role("admin", "analyst"))):
     """Manual API ingestion route (for fallback)."""
-    return await orchestrator.ingest_logs(request.logs)
+    return await orchestrator.ingest_logs(body.logs)
 
 @app.post("/analyze", tags=["Analysis"])
-async def analyze_logs(request: AnalysisRequest):
+@limiter.limit(rate_limit_analyze)
+async def analyze_logs(request: Request, body: AnalysisRequest, user: User = Depends(require_role("admin", "analyst"))):
     """Run agentic RAG analysis on the log store."""
-    return await orchestrator.analyze_query(request.query)
+    return await orchestrator.analyze_query(body.query)
 
 @app.get("/", tags=["Health"])
 async def root():
@@ -247,7 +269,8 @@ async def root():
 
 
 @app.get("/plugins", tags=["Plugins"])
-async def list_plugins():
+@limiter.limit(rate_limit_default)
+async def list_plugins(request: Request, user: User = Depends(require_role("admin", "analyst", "viewer"))):
     registry = getattr(app.state, "plugin_registry", None)
     if registry is None:
         return {"plugins": []}
@@ -260,8 +283,41 @@ async def list_plugins():
 
 
 @app.get("/incidents", tags=["Incidents"])
-async def list_incidents(limit: int = 50):
+@limiter.limit(rate_limit_default)
+async def list_incidents(request: Request, limit: int = 50, user: User = Depends(require_role("admin", "analyst", "viewer"))):
     store = getattr(app.state, "incident_store", None)
     if store is None:
         return {"incidents": []}
     return {"incidents": store.list(limit=limit)}
+
+class SearchRequest(BaseModel):
+    query: str
+    limit: int = 10
+    filters: Optional[Dict[str, Any]] = None
+
+@app.post("/search", tags=["Search"])
+@limiter.limit(rate_limit_default)
+async def search_logs(request: Request, body: SearchRequest, user: User = Depends(require_role("admin", "analyst"))):
+    results = orchestrator.search(body.query, body.limit, body.filters)
+    return {"results": results, "count": len(results)}
+
+@app.get("/summary", tags=["Summary"])
+@limiter.limit(rate_limit_default)
+async def get_summary(
+    request: Request,
+    service: Optional[str] = None,
+    granularity: str = "hourly",
+    date: Optional[str] = None,
+    user: User = Depends(require_role("admin", "analyst", "viewer"))
+):
+    return orchestrator.get_summary(service, granularity, date)
+
+@app.get("/audit-trail", tags=["Audit"])
+@limiter.limit(rate_limit_default)
+async def get_audit_trail(
+    request: Request,
+    user_filter: Optional[str] = None,
+    limit: int = 100,
+    user: User = Depends(require_role("admin"))
+):
+    return {"events": audit_logger.query(user_filter=user_filter, limit=limit)}

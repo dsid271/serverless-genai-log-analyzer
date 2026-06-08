@@ -58,3 +58,49 @@ class DeltaLakeStorage:
         """Returns the transaction history of the Delta Table (Audit Trail)."""
         dt = DeltaTable(self.table_path)
         return dt.history()
+
+    def query_logs_filtered(self, service: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
+        df = self.query_logs()
+        if df.empty:
+            return df
+            
+        if service:
+            df = df[df.get("source", "") == service]
+            
+        if start_date and "timestamp" in df.columns:
+            # simple mock filter, assuming timestamp strings are sortable or standard ISO format
+            df = df[df["timestamp"] >= start_date]
+            
+        if end_date and "timestamp" in df.columns:
+            df = df[df["timestamp"] <= end_date]
+            
+        return df
+
+    def get_summary(self, service: Optional[str] = None, granularity: str = "hourly", date: Optional[str] = None) -> Dict[str, Any]:
+        """Compute summary statistics."""
+        df = self.query_logs()
+        if df.empty:
+            return {"service": service, "date": date, "hourly_summaries": []}
+            
+        if service:
+            df = df[df.get("source", "") == service]
+            
+        if date and "timestamp" in df.columns:
+            # Assuming timestamp contains date, rough filter for the day
+            df = df[df["timestamp"].astype(str).str.startswith(date)]
+            
+        total_logs = len(df)
+        error_count = len(df[df.get("severity", "").astype(str).str.upper().isin(["ERROR", "CRITICAL"])])
+        
+        return {
+            "service": service,
+            "date": date,
+            "hourly_summaries": [
+                {
+                    "hour": "Summary (mocked granular window)",
+                    "total_logs": total_logs,
+                    "error_count": error_count,
+                    "error_rate": error_count / total_logs if total_logs > 0 else 0,
+                }
+            ]
+        }

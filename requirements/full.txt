@@ -15,3 +15,6 @@ pyarrow>=17.0.0
 aiokafka>=0.11.0
 markdown>=3.7
 pyyaml>=6.0
+slowapi>=0.1.9
+structlog>=24.0.0
+passlib[bcrypt]>=1.7.4

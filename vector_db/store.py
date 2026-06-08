@@ -1,5 +1,5 @@
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import chromadb
 from chromadb.config import Settings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -30,12 +30,17 @@ class VectorStore:
             ids=ids
         )
 
-    def search_logs(self, query: str, n_results: int = 5) -> List[Dict[str, Any]]:
+    def search_logs(self, query: str, n_results: int = 5, where_filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Semantic search for relevant logs."""
-        results = self.collection.query(
-            query_texts=[query],
-            n_results=n_results
-        )
+        kwargs = {
+            "query_texts": [query],
+            "n_results": n_results
+        }
+        if where_filter:
+            kwargs["where"] = where_filter
+
+        results = self.collection.query(**kwargs)
+        
         # Flatten results into a cleaner list of logs
         flattened = []
         if results["metadatas"]:

@@ -1,0 +1,27 @@
+# API Key Configuration
+# =====================
+# Generate hashes with: uv run python scripts/generate_key.py "your-key"
+#
+# Roles:
+#   admin   — full access (ingest, analyze, search, delete, audit-trail)
+#   analyst — read + write (ingest, analyze, search, summary)
+#   viewer  — read-only (summary, plugins, incidents)
+#
+# Mount a custom file at runtime:
+#   docker run -v ./my_keys.yaml:/app/api/api_keys.yaml ...
+
+keys:
+  - name: "admin-demo"
+    # Plain-text key: demo-admin-key  (CHANGE IN PRODUCTION)
+    key_hash: "$2b$12$LJ3m6Mq.Sy8BPaNhPkdVc.OKLhRBCakDMfJRCOCxgv9aALfpJnHOa"
+    role: "admin"
+
+  - name: "analyst-demo"
+    # Plain-text key: demo-analyst-key  (CHANGE IN PRODUCTION)
+    key_hash: "$2b$12$K0RY2dxVmj6TQJxrv3MYSeXjNLzLjDqNx5E5CJKA9GjFmNqIxJHHi"
+    role: "analyst"
+
+  - name: "viewer-demo"
+    # Plain-text key: demo-viewer-key  (CHANGE IN PRODUCTION)
+    key_hash: "$2b$12$vWsQzZUY1UKbxbhMPNPFIeD0xTQKqJ7X.5MfhJJQXUmyGBJkkDIb."
+    role: "viewer"

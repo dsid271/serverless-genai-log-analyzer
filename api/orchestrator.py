@@ -53,3 +53,9 @@ class SystemOrchestrator:
         """Agentic analysis."""
         # Note: Analysis is usually compute-intensive, we keep it async for the API
         return self.engine.analyze(query)
+
+    def search(self, query: str, limit: int = 10, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        return self.vector_store.search_logs(query, limit, filters)
+
+    def get_summary(self, service: Optional[str] = None, granularity: str = "hourly", date: Optional[str] = None) -> Dict[str, Any]:
+        return self.storage.get_summary(service, granularity, date)
