@@ -6,7 +6,7 @@ This project demonstrates the development and deployment of a cloud-native, serv
 
 The system architecture features a **FastAPI** backend that orchestrates the **Gemini API** via **LangChain** to process and summarize complex network logs. To ensure a robust and scalable solution, the application is containerized with **Docker** and deployed on **Google Cloud Run**, a serverless platform that aligns with cloud-native principles.
 
-A key component of this project is the fully automated **Continuous Integration/Continuous Deployment (CI/CD)** pipeline, implemented with **GitHub Actions**. This workflow automatically builds and deploys the application with every code change, proving a strong commitment to code quality, reliability, and automated delivery.
+A key component of this project is the fully automated **Continuous Integration (CI)** pipeline, implemented with **GitHub Actions**. This workflow automatically runs linting and smoke tests, and publishes a Docker image to the GitHub Container Registry (GHCR) with every code change. Continuous Deployment (CD) to Cloud Run is a planned future enhancement.
 
 This project goes beyond a simple proof of concept, serving as a comprehensive demonstration of skills in **containerization, MLOps, CI/CD, and the application of Generative AI** in a practical, real-world context.
 
@@ -14,7 +14,7 @@ Note: _This repo currently implements a lightweight, serverless FastAPI service 
 
 ## Implemented Now (MVP)
 
-- **FastAPI API** with `/ingest`, `/analyze`, `/plugins`, `/incidents`
+- **FastAPI API** with `GET /`, `POST /ingest`, `POST /analyze`, `GET /plugins`, `GET /incidents`, `POST /search`, `GET /summary`, `GET /audit-trail`
 - **Modular plugin system** via `ENABLED_CONNECTORS`, `ENABLED_DETECTORS`, `ENABLED_ANALYZERS`
 - **Plugin loading** via `PLUGIN_MODULES` (derived-image friendly)
 - **Proactive detection** (`error_spike`) and **incident store** with attached analyzer outputs
@@ -25,32 +25,35 @@ Note: _This repo currently implements a lightweight, serverless FastAPI service 
 ```mermaid
 graph TB
     LogSources[" Log Sources<br/>(Network Devices, Apps, Firewalls)"]
-    Kafka[" Real-Time Ingestion<br/>(Apache Kafka)"]
-    StreamProc[" Stream Processing<br/>(PySpark Structured Streaming<br/>or Apache Flink)"]
-    DeltaLake[" Storage<br/>(Delta Lake / Iceberg)<br/>ACID-compliant"]
-    VectorDB[" Vector Database<br/>(Chroma / Weaviate)<br/>Embeddings & Semantic Search"]
-    GenAI[" GenAI Analysis Engine<br/>(LangChain + Gemini/LLM)"]
-    API[" API & Query Interface<br/>(FastAPI on Cloud Run)"]
-    Observability[" Observability & Audit<br/>(LangSmith, Kibana, Logs)"]
+    Kafka[" Real-Time Ingestion<br/>(Apache Kafka) - Optional"]
+    FastAPI[" FastAPI /ingest"]
+    Enricher[" LogEnricher<br/>(PII redaction)"]
+    DeltaLake[" Storage<br/>(Delta Lake local)<br/>ACID-compliant"]
+    VectorDB[" Vector Database<br/>(Chroma local)<br/>Embeddings & Semantic Search"]
+    GenAI[" GenAI Analysis Engine<br/>(LangGraph + Gemini)"]
+    API[" API & Query Interface<br/>(FastAPI)"]
     
-    LogSources -->|High-throughput| Kafka
-    Kafka -->|Stream data| StreamProc
-    StreamProc -->|Parse & filter| DeltaLake
-    StreamProc -->|Log embeddings| VectorDB
-    DeltaLake <-->|ACID reads/writes| GenAI
+    LogSources -->|Optional| Kafka
+    LogSources -->|Direct HTTP| FastAPI
+    Kafka -->|Stream data| FastAPI
+    FastAPI -->|Parse & filter| Enricher
+    Enricher -->|Store| DeltaLake
+    Enricher -->|Log embeddings| VectorDB
+    DeltaLake <-->|Queries| GenAI
     VectorDB -->|Semantic search| GenAI
     GenAI -->|Results & insights| API
-    API -->|Queries & logs| Observability
-    StreamProc -->|Metrics & lineage| Observability
 ```
+
+*(Note: See [ARCHITECTURE.md](./ARCHITECTURE.md) for the planned future scale-out architecture featuring Spark/Flink and managed cloud services.)*
 
 ## Key Features
 
+- **Modular DI**: All core components (redactor, storage, vector store, engine) are injected via constructor with automatic null fallbacks.
 - **Scalable path**: designed to scale out to Kafka + Spark/Flink for terabytes/day (future)
-- **Secure**: PII masking, RBAC, encrypted storage
+- **Secure**: PII masking, RBAC (via API Keys), and structured audit logging.
 - **Compliant**: Append-only storage, audit trails, data lineage (banking/telecom)
-- **Intelligent**: Natural language queries, anomaly detection, summarization via GenAI
-- **Serverless**: Auto-scaling FastAPI on Cloud Run; minimal ops overhead
+- **Intelligent**: Natural language queries, anomaly detection, summarization via a LangGraph Agentic workflow.
+- **Serverless Ready**: Designed for auto-scaling FastAPI on Cloud Run; minimal ops overhead
 
 ---
 
@@ -70,14 +73,25 @@ uv run python -m spacy download en_core_web_sm
 ```
 
 ### 2. Environment Setup
-Create a `.env` file in the root:
+Copy the example environment file and fill in your keys (a `GEMINI_API_KEY` is required for the LLM analyzer to work):
+```powershell
+cp .env.example .env
+```
+Ensure your `.env` has the necessary values:
 ```env
 GEMINI_API_KEY=your_key_here
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_API_KEY=your_langchain_api_key_here
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092
 LOG_TOPIC=logs-raw
+VECTOR_DB_TYPE=chroma
+CHROMA_PATH=./data/chroma
+DELTA_LAKE_PATH=./data/delta-lake
+ENABLE_AUTH=false
+API_KEYS_FILE=./api/api_keys.yaml
 ```
 
-### 2. Running the API
+### 3. Running the API
 ```powershell
 uv run uvicorn api.main:app --reload
 ```

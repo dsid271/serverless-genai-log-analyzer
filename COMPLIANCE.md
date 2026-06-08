@@ -10,15 +10,15 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
 ## 1. Data Classification & PII Management
 
 ### PII Detection & Redaction
-- [ ] Identify PII types: credit cards, SSNs, passwords, emails, phone numbers
-- [ ] Implement detection: regex + ML (Presidio, custom classifiers)
-- [ ] Redaction strategy:
-  - [ ] Credit cards: `xxxx-xxxx-xxxx-1234` (last 4 visible)
-  - [ ] SSNs: `xxx-xx-5678` (last 4 visible)
-  - [ ] Passwords: **remove entirely**
-  - [ ] Emails: `user***@domain.com`
+- [x] Identify PII types: credit cards, SSNs, passwords, emails, phone numbers
+- [x] Implement detection: regex + ML (Presidio, custom classifiers)
+- [x] Redaction strategy:
+  - [x] Credit cards: `xxxx-xxxx-xxxx-1234` (last 4 visible)
+  - [x] SSNs: `xxx-xx-5678` (last 4 visible)
+  - [x] Passwords: **remove entirely**
+  - [x] Emails: `user***@domain.com`
 - [ ] Classification metadata: tag all logs (public / internal / confidential / PII)
-- [ ] Testing: 99%+ precision, <5% false negatives
+- [x] Testing: 99%+ precision, <5% false negatives
 
 ### Data Retention & Deletion (GDPR & PCI-DSS)
 - [ ] **PII data**: 90 days (right to be forgotten)
@@ -84,14 +84,14 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
 - [ ] Testing: OWASP top 10 authn tests
 
 ### Authorization (Authz) & RBAC
-- [ ] **Roles defined**: admin, analyst, viewer (+ custom roles)
-- [ ] **Admin**: full access, user/role management, config changes
-- [ ] **Analyst**: search, analyze, cannot delete or export raw data
-- [ ] **Viewer**: read-only, pre-computed reports only
+- [x] **Roles defined**: admin, analyst, viewer (+ custom roles)
+- [x] **Admin**: full access, user/role management, config changes
+- [x] **Analyst**: search, analyze, cannot delete or export raw data
+- [x] **Viewer**: read-only, pre-computed reports only
 - [ ] **Field-level access**: PII fields hidden from non-admin
 - [ ] **Data-level access**: restrict by department, region, etc.
 - [ ] **Audit trail**: log all permission changes
-- [ ] Testing: attempt unauthorized access (negative tests)
+- [x] Testing: attempt unauthorized access (negative tests)
 
 ### Access Control Lists (ACLs)
 - [ ] **Kafka**: SASL ACLs per producer/consumer
@@ -106,14 +106,14 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
 ## 4. Audit Logging & Accountability
 
 ### Query Audit Trail
-- [ ] **Every search logged**: user, timestamp, query, results count
-- [ ] **Every analysis logged**: user, timestamp, prompt, LLM response
+- [x] **Every search logged**: user, timestamp, query, results count
+- [x] **Every analysis logged**: user, timestamp, prompt, LLM response
 - [ ] **Every export logged**: user, timestamp, fields, row count
-- [ ] **Data access**: all reads logged (not just modifications)
+- [x] **Data access**: all reads logged (not just modifications)
 - [ ] **Sensitive operations**: user deletions, role changes, key rotations
-- [ ] **Storage**: immutable, append-only (Delta Lake)
+- [x] **Storage**: immutable, append-only (Delta Lake)
 - [ ] **Retention**: 7 years minimum
-- [ ] **Searchability**: query audit logs via API (with RBAC)
+- [x] **Searchability**: query audit logs via API (with RBAC)
 
 ### Configuration Change Audit
 - [ ] **Infrastructure changes**: terraform plan/apply logged
@@ -150,8 +150,8 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
 - [ ] **VPC Flow Logs**: monitor network traffic
 
 ### API Security
-- [ ] **Rate limiting**: 100 req/min per user (configurable)
-- [ ] **Input validation**: all query parameters validated (SQL injection prevention)
+- [x] **Rate limiting**: 100 req/min per user (configurable)
+- [x] **Input validation**: all query parameters validated (SQL injection prevention)
 - [ ] **CORS**: whitelist trusted origins
 - [ ] **CSRF protection**: token-based (if applicable)
 - [ ] **Timeout**: max query timeout 30 seconds (prevent resource exhaustion)
@@ -310,10 +310,10 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
 ## Quick Checklist Summary (Priority Order)
 
 ### Critical (Week 1–4)
-- [ ] PII detection & redaction (99%+ precision)
+- [x] PII detection & redaction (99%+ precision)
 - [ ] Encryption in transit (TLS 1.3) & at rest (KMS)
-- [ ] RBAC (admin, analyst, viewer)
-- [ ] Audit logging (all queries, data access)
+- [x] RBAC (admin, analyst, viewer)
+- [x] Audit logging (all queries, data access)
 - [ ] Network security (private VPC, firewall rules)
 
 ### High (Week 5–12)
@@ -331,4 +331,4 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
 
 ---
 
-*Last Updated: 2026-02-06*
+*Last Updated: 2026-06-09*

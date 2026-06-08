@@ -4,7 +4,7 @@
 
 ## Implementation Status
 
-This document describes the target architecture. **The current repository implements a lightweight MVP** (FastAPI + modular plugins + optional Kafka connector + proactive detectors + incident analyzers). The **Spark/Flink streaming layer is a planned scale-out step** and is not implemented in this codebase yet.
+This document describes the target architecture. **The current repository implements a fully-functional MVP** (FastAPI + modular plugins + optional Kafka connector + proactive detectors + incident analyzers + RBAC + Audit Logging). The **Spark/Flink streaming layer, managed infrastructure, and observability dashboards are planned scale-out steps** and are not implemented in this codebase yet.
 
 ## Table of Contents
 - [System Diagram](#system-diagram)
@@ -52,7 +52,7 @@ flowchart TD
 
 ## Component Responsibilities
 
-### 1. **Log Sources**
+### 1. **Log Sources** `[PLANNED]`
 
 **What**: Network devices, applications, databases, security tools
 - **Examples**: Routers, firewalls, API servers, microservices, database query logs, SIEM tools
@@ -84,7 +84,7 @@ flowchart TD
 
 ---
 
-### 2. **Kafka (Ingestion Layer)**
+### 2. **Kafka (Ingestion Layer)** `[IMPLEMENTED — Optional]`
 
 **Purpose**: 
 - Buffer incoming logs; decouple producers/consumers
@@ -120,7 +120,7 @@ flowchart TD
 
 ---
 
-### 3. **Stream Processing (PySpark / Flink)**
+### 3. **Stream Processing (PySpark / Flink)** `[PARTIAL — FastAPI in-process only]`
 
 **Purpose**: 
 - Parse, enrich, filter, and aggregate logs in real time
@@ -222,7 +222,7 @@ errors_per_service = parsed_df \
 
 ---
 
-### 4. **Delta Lake / Iceberg (Storage Layer)**
+### 4. **Delta Lake / Iceberg (Storage Layer)** `[IMPLEMENTED — Local filesystem]`
 
 **Purpose**: 
 - ACID-compliant, time-travel capable data lake
@@ -308,7 +308,7 @@ spark.sql("DELETE FROM logs_raw WHERE pii_fields IS NOT NULL AND timestamp < cur
 
 ---
 
-### 5. **Vector Database (Semantic Search)**
+### 5. **Vector Database (Semantic Search)** `[IMPLEMENTED — ChromaDB local]`
 
 **Purpose**: 
 - Store embeddings of log messages
@@ -370,7 +370,7 @@ results = vector_db.search(
 
 ---
 
-### 6. **GenAI Analysis Engine (LangChain + LLM)**
+### 6. **GenAI Analysis Engine (LangGraph + Gemini)** `[IMPLEMENTED]`
 
 **Purpose**: 
 - Answer natural language questions about logs
@@ -396,36 +396,38 @@ LLM generates response (synthesis, root cause, recommendations)
 Return to user + cache response
 ```
 
-**LangChain Implementation**:
+**LangGraph Implementation**:
 ```python
-from langchain.chat_models import ChatGemini
-from langchain.prompts import PromptTemplate
-from langchain.chains import RetrievalQA
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.graph import StateGraph, END
+from typing import TypedDict, Annotated, List
+from langchain_core.messages import BaseMessage
 
-llm = ChatGemini(model="gemini-pro", temperature=0.2)
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], "The messages in the conversation"]
+    query: str
+    documents: List[str]
+    is_relevant: bool
+    generation: str
 
-prompt_template = PromptTemplate(
-    input_variables=["context", "question"],
-    template="""
-    You are a log analysis expert for banking systems.
-    Context (relevant logs):
-    {context}
-    
-    Question: {question}
-    
-    Provide root cause analysis, impact assessment, and remediation steps.
-    """
+workflow = StateGraph(AgentState)
+workflow.add_node("retrieve", retrieve_node)
+workflow.add_node("grade", grade_node)
+workflow.add_node("generate", generate_node)
+workflow.add_node("transform_query", transform_query_node)
+
+workflow.set_entry_point("retrieve")
+workflow.add_edge("retrieve", "grade")
+workflow.add_conditional_edges(
+    "grade",
+    decide_to_generate,
+    {"yes": "generate", "no": "transform_query"}
 )
+workflow.add_edge("transform_query", "retrieve")
+workflow.add_edge("generate", END)
 
-qa_chain = RetrievalQA.from_chain_type(
-    llm=llm,
-    chain_type="stuff",
-    retriever=vector_db_retriever,
-    prompt=prompt_template,
-    return_source_documents=True
-)
-
-response = qa_chain({"query": "Why did payments fail at 2 PM?"})
+app = workflow.compile()
+response = app.invoke({"query": "Why did payments fail at 2 PM?", "messages": []})
 ```
 
 #### b) **Capabilities**:
@@ -469,7 +471,7 @@ os.environ["LANGCHAIN_PROJECT"] = "genai-log-analyzer"
 
 ---
 
-### 7. **FastAPI Query Interface (Cloud Run)**
+### 7. **FastAPI Query Interface (Cloud Run)** `[IMPLEMENTED]`
 
 **Purpose**: 
 - Expose RESTful API for log search, analysis, and audit
@@ -580,7 +582,7 @@ curl -X GET 'https://api.genai-logs.example.com/audit-trail?user=analyst-01&date
 }
 ```
 
-**Authentication & RBAC**:
+**Authentication & RBAC** `[IMPLEMENTED]`:
 
 | Role | `/search` | `/analyze` | `/summary` | `/audit-trail` | Delete Data |
 |------|-----------|-----------|-----------|----------------|-------------|
@@ -594,8 +596,8 @@ curl -X GET 'https://api.genai-logs.example.com/audit-trail?user=analyst-01&date
 - **LLM calls**: 10 calls/min (expensive operations)
 
 **Deployment**:
-- **Cloud Run**: Auto-scales 0–100 instances
-- **Container**: Python 3.11 + FastAPI + Gunicorn
+- **Cloud Run**: Auto-scales 0–100 instances (planned)
+- **Container**: Python 3.12 + FastAPI + Uvicorn
 - **Latency SLA**: <2s P95 for search, <5s P95 for analysis
 
 **Monitoring**:
@@ -605,7 +607,7 @@ curl -X GET 'https://api.genai-logs.example.com/audit-trail?user=analyst-01&date
 
 ---
 
-### 8. **Observability & Audit (LangSmith, Cloud Logging, Kibana)**
+### 8. **Observability & Audit (LangSmith, Cloud Logging, Kibana)** `[PLANNED]`
 
 **Purpose**: 
 - Monitor all components (latency, throughput, errors)
@@ -884,4 +886,4 @@ helm/
 
 ---
 
-*Last Updated: 2026-02-06 | Maintained by: dsid271*
+*Last Updated: 2026-06-09 | Maintained by: dsid271*
