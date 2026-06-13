@@ -1,6 +1,5 @@
 import json
 from processing.redactor import LogRedactor
-from pprint import pprint
 
 def test_production_redaction(profile="financial"):
     print(f"\n--- TESTING WITH PROFILE: {profile} ---")

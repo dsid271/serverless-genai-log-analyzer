@@ -4,7 +4,7 @@ from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 from presidio_analyzer.nlp_engine import NlpEngineProvider
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 class LogRedactor:
     _analyzer = None  # Class-level variables (Singleton pattern)

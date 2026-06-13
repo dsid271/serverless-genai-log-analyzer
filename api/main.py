@@ -3,7 +3,6 @@ from api.orchestrator import SystemOrchestrator
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import os
-import asyncio
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 from core.plugin_registry import PluginRegistry, PluginSpec

@@ -14,13 +14,13 @@ class VectorStore:
             for k, v in where_filter.items():
                 # simple mock filter
                 if isinstance(v, list):
-                    matches = [l for l in matches if l.get(k) in v]
+                    matches = [item for item in matches if item.get(k) in v]
                 else:
-                    matches = [l for l in matches if l.get(k) == v]
+                    matches = [item for item in matches if item.get(k) == v]
 
         if not query:
             return matches[-n_results:]
             
         q = query.lower()
-        matches = [l for l in matches if q in str(l.get("message", "")).lower()]
+        matches = [item for item in matches if q in str(item.get("message", "")).lower()]
         return matches[:n_results]
