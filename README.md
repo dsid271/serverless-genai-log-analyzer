@@ -8,8 +8,6 @@ The system architecture features a **FastAPI** backend that orchestrates the **G
 
 A key component of this project is the fully automated **Continuous Integration (CI)** pipeline, implemented with **GitHub Actions**. This workflow automatically runs linting and smoke tests, and publishes a Docker image to the GitHub Container Registry (GHCR) with every code change. Continuous Deployment (CD) to Cloud Run is a planned future enhancement.
 
-This project goes beyond a simple proof of concept, serving as a comprehensive demonstration of skills in **containerization, MLOps, CI/CD, and the application of Generative AI** in a practical, real-world context.
-
 Note: _This repo currently implements a lightweight, serverless FastAPI service with modular plugins (connectors/detectors/analyzers). Spark/Flink are part of the **future scale-out plan** and are not implemented in this codebase yet._
 
 ## Implemented Now (MVP)
