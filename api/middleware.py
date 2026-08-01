@@ -42,6 +42,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
         error_msg = ""
         results_count = 0
         pii_accessed = False
+        contains_pii = False
         
         try:
             response = await call_next(request)
@@ -51,6 +52,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
             # Extract info from state if handlers populated it
             results_count = getattr(request.state, "results_count", 0)
             pii_accessed = getattr(request.state, "pii_accessed", False)
+            contains_pii = getattr(request.state, "contains_pii", False) or pii_accessed
             user_identity = getattr(request.state, "user_identity", "anonymous")
             
         except Exception as e:
@@ -75,6 +77,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                 query_params=str(request.query_params),
                 results_count=results_count,
                 pii_accessed=pii_accessed,
+                contains_pii=contains_pii,
                 duration_ms=duration_ms,
                 status_code=status_code,
                 error=error_msg,

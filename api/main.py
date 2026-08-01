@@ -245,7 +245,9 @@ async def ingest_logs(request: Request, body: LogIngestRequest, user: User = Dep
     """Manual API ingestion route (for fallback)."""
     response = await orchestrator.ingest_logs(body.logs)
     request.state.results_count = response.get("count", 0)
-    request.state.pii_accessed = bool(response.get("contains_pii", False))
+    contains_pii = bool(response.get("contains_pii", False))
+    request.state.pii_accessed = contains_pii
+    request.state.contains_pii = contains_pii
     return response
 
 @app.post("/analyze", tags=["Analysis"])

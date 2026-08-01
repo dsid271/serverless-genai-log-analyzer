@@ -55,4 +55,9 @@ def test_api_ingest_search_summary_audit(monkeypatch):
 
         audit_response = client.get("/audit-trail")
         assert audit_response.status_code == 200, audit_response.text
+        events = audit_response.json().get("events", [])
         assert "events" in audit_response.json()
+        assert any(
+            event.get("action") == "POST /ingest" and event.get("contains_pii") is True
+            for event in events
+        )

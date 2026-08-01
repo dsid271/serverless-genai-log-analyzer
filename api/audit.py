@@ -28,6 +28,7 @@ class AuditLogger:
         query_params: str = "",
         results_count: int = 0,
         pii_accessed: bool = False,
+        contains_pii: bool = False,
         duration_ms: float = 0.0,
         status_code: int = 200,
         error: str = "",
@@ -44,6 +45,7 @@ class AuditLogger:
             "query_params": query_params,
             "results_count": results_count,
             "pii_accessed": pii_accessed,
+            "contains_pii": contains_pii,
             "duration_ms": duration_ms,
             "status_code": status_code,
             "error": error,
@@ -72,6 +74,8 @@ class AuditLogger:
             dt = DeltaTable(self.table_path)
             df = dt.to_pandas()
             
+            if "contains_pii" not in df.columns:
+                df["contains_pii"] = df.get("pii_accessed", False)
             if user_filter:
                 df = df[df["user"] == user_filter]
                 
