@@ -5,4 +5,5 @@ __pycache__/
 *.pyc
 
 data/chroma/
+data/delta-lake/
 *.sqlite3
