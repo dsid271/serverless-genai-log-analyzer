@@ -43,11 +43,13 @@ class SystemOrchestrator:
     async def ingest_logs(self, raw_logs: List[Dict[str, Any]]):
         """Full pipeline ingestion for batch logs."""
         results = []
+        contains_pii = False
         for log in raw_logs:
             res = await self.ingest_single_log(log)
+            contains_pii = contains_pii or bool(res.get("contains_pii", False))
             results.append(res)
             
-        return {"status": "success", "count": len(results)}
+        return {"status": "success", "count": len(results), "contains_pii": contains_pii}
 
     async def analyze_query(self, query: str):
         """Agentic analysis."""

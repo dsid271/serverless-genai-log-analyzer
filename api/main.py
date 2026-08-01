@@ -243,7 +243,10 @@ class AnalysisRequest(BaseModel):
 @limiter.limit(rate_limit_ingest)
 async def ingest_logs(request: Request, body: LogIngestRequest, user: User = Depends(require_role("admin", "analyst"))):
     """Manual API ingestion route (for fallback)."""
-    return await orchestrator.ingest_logs(body.logs)
+    response = await orchestrator.ingest_logs(body.logs)
+    request.state.results_count = response.get("count", 0)
+    request.state.pii_accessed = bool(response.get("contains_pii", False))
+    return response
 
 @app.post("/analyze", tags=["Analysis"])
 @limiter.limit(rate_limit_analyze)

@@ -55,16 +55,20 @@ class ErrorSpikeDetector:
                 if self._cooldown_seconds > 0 and (now - self._last_incident_at) < self._cooldown_seconds:
                     continue
 
-                # Emit a single incident and reset the window to avoid spamming.
+                # Preserve PII redaction context in error incidents.
+                contains_pii = bool(event.get("contains_pii", False))
+                details = {
+                    "window_seconds": self._window_seconds,
+                    "threshold": self._threshold,
+                    "count": len(self._events),
+                    "cooldown_seconds": self._cooldown_seconds,
+                    "contains_pii": contains_pii,
+                }
+
                 inc = self._store.add(
                     kind="error_spike",
                     message=f"Error spike detected: {len(self._events)} errors in last {self._window_seconds}s",
-                    details={
-                        "window_seconds": self._window_seconds,
-                        "threshold": self._threshold,
-                        "count": len(self._events),
-                        "cooldown_seconds": self._cooldown_seconds,
-                    },
+                    details=details,
                 )
                 self._last_incident_at = now
 
