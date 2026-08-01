@@ -79,16 +79,16 @@ class LogRedactor:
 
         return anonymized_result.text
 
-    def redact_structured_fields(self, log_entry: Dict[str, Any]) -> Dict[str, Any]:
+    def redact_structured_fields(self, log_entry: Dict[str, Any], pii_fields: list[str]) -> Dict[str, Any]:
         """
         The "Safety Net": Masks known sensitive keys in the log dictionary.
         """
         sensitive_keys = {"customer_id", "user_id", "phone", "email", "client_ip", "password"}
         
-        for key in log_entry:
-            # If the key itself is sensitive (like 'customer_id'), we hide its value immediately
+        for key in list(log_entry.keys()):
             if key.lower() in sensitive_keys:
                 log_entry[key] = "[REDACTED]"
+                pii_fields.append(key)
         
         return log_entry
 
@@ -98,14 +98,21 @@ class LogRedactor:
         """
         # Always work on a copy to avoid side-effects
         clean_entry = log_entry.copy()
+        pii_fields: list[str] = []
         
         # 1. First, handle fixed sensitive fields
-        clean_entry = self.redact_structured_fields(clean_entry)
+        clean_entry = self.redact_structured_fields(clean_entry, pii_fields)
         
         # 2. Second, run the AI model on the 'message' or 'payload' fields
         fields_to_analyze = ["message", "error_details", "description"]
         for field in fields_to_analyze:
             if field in clean_entry and isinstance(clean_entry[field], str):
-                clean_entry[field] = self.redact_text(clean_entry[field])
-            
+                original_value = clean_entry[field]
+                cleaned_value = self.redact_text(original_value)
+                clean_entry[field] = cleaned_value
+                if cleaned_value != original_value:
+                    pii_fields.append(field)
+
+        clean_entry["pii_fields"] = sorted(set(pii_fields))
+        clean_entry["contains_pii"] = bool(pii_fields)
         return clean_entry
