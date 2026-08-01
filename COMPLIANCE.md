@@ -126,7 +126,7 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
 ### Data Access Audit
 - [ ] **Who accessed what**: user, timestamp, data, duration
 - [ ] **Bulk exports**: flagged for review (unusual patterns)
-- [ ] **PII access**: logged separately, reviewed regularly
+- [x] **PII access**: logged separately, reviewed regularly
 - [ ] **Alerts**: trigger on suspicious patterns (e.g., exporting >10K records)
 
 ### Audit Log Integrity

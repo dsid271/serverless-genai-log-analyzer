@@ -50,6 +50,7 @@ graph TB
 - **Scalable path**: designed to scale out to Kafka + Spark/Flink for terabytes/day (future)
 - **Secure**: PII masking, RBAC (via API Keys), and structured audit logging.
 - **Compliant**: Append-only storage, audit trails, data lineage (banking/telecom)
+- **Audit-aware PII tracing**: ingestion and audit events persist `contains_pii` so the API can expose redaction status directly.
 - **Intelligent**: Natural language queries, anomaly detection, summarization via a LangGraph Agentic workflow.
 - **Serverless Ready**: Designed for auto-scaling FastAPI on Cloud Run; minimal ops overhead
 
