@@ -42,7 +42,7 @@ flowchart TD
     style H fill:#ede7f6
 ```
 
-**Key Properties:**
+**Target Properties:**
 - **Throughput**: 100 MB/s – 10 GB/s (Kafka → Spark → Storage)
 - **Latency**: <2s P95 for API searches, <5s P95 for LLM analysis
 - **Compliance**: PII masking, audit trail, data retention enforcement

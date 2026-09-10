@@ -1,23 +1,26 @@
 [
-    {
-        "type": "websock_access",
-        "message": "192.168.1.45 - - [06/Feb/2026:14:23:45 +0000] \"POST /auth/login HTTP/1.1\" 200 512 \"-\" \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\" user_email=\"victim@hacker.com\"",
-        "source": "nginx-proxy"
-    },
-    {
-        "type": "banking_transaction",
-        "message": "Transaction failed for customer_id: 8827361. Reason: Insufficient funds. Initiated from IP 203.0.113.19. Secondary factor sent to +1-555-098-7654.",
-        "customer_id": "8827361",
-        "severity": "ERROR"
-    },
-    {
-        "type": "syslog_security",
-        "message": "Feb 6 14:25:01 web-server-01 sshd[12345]: Failed password for root from 185.156.177.214 port 54321 ssh2",
-        "source": "ssh-daemon"
-    },
-    {
-        "type": "pci_audit",
-        "message": "Audit log: Credit card validation successful for card ending in 4111-2222-3333-4444. User: jane_doe_finance",
-        "user_id": "jane_doe_finance"
-    }
+  {
+    "type": "device_syslog",
+    "message": "Sep  9 10:00:01 rtr-lab-edge-01 %BGP-5-ADJCHANGE: neighbor 10.0.12.9 Down - hold time expired",
+    "source": "rtr-lab-edge-01",
+    "severity": "ERROR"
+  },
+  {
+    "type": "change_audit",
+    "message": "Config push to sw-lab-access-02 failed at stage 3/7. Rollback initiated by jane.doe@example.com, escalation SMS to +1-555-098-7654.",
+    "source": "config-orchestrator",
+    "severity": "CRITICAL"
+  },
+  {
+    "type": "auth_failure",
+    "message": "Sep  9 10:00:14 rtr-lab-edge-01 sshd[4471]: Failed password for netadmin from 198.51.100.14 port 54321 ssh2",
+    "source": "rtr-lab-edge-01",
+    "severity": "ERROR"
+  },
+  {
+    "type": "task_precheck",
+    "message": "Pre-check failed on sw-lab-access - truncated hostname matched 2 candidate devices, manual review required for operator emp-00001",
+    "source": "task-runner",
+    "severity": "ERROR"
+  }
 ]

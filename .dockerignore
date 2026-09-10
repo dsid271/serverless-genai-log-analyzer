@@ -12,3 +12,4 @@ __pycache__
 *.bin
 *.zip
 .env
+main_old.py.bak

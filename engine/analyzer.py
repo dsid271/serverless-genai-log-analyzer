@@ -14,6 +14,8 @@ class AgentState(TypedDict):
     documents: List[str]
     is_relevant: bool
     generation: str
+    attempts: int
+    
 
 class LogAnalysisEngine:
     """
@@ -22,7 +24,7 @@ class LogAnalysisEngine:
     """
     def __init__(self, gemini_api_key: str, vector_store: VectorStore):
         self.vector_store = vector_store
-        self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=gemini_api_key)
+        self._llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=gemini_api_key)
         self.workflow = self._create_workflow()
 
     def _create_workflow(self):
@@ -75,12 +77,17 @@ class LogAnalysisEngine:
     def transform_query_node(self, state: AgentState):
         """Rewrites the query if retrieval fails."""
         # Simple placeholder for query optimization
-        new_query = f"Optimized search for: {state['query']}"
-        return {"query": new_query}
+        return {
+        "query": f"{state['query']} (network logs, errors, root cause)",
+        "attempts": state.get("attempts", 0) + 1,
+    }
 
     # --- Conditional Edge logic ---
     def decide_to_generate(self, state: AgentState):
-        return "yes" if state["is_relevant"] else "no"
+        if state["is_relevant"]:
+            return "yes"
+        return "no" if state.get("attempts", 0) < 2 else "yes"
+
 
     def analyze(self, query: str):
         """Executes the graph with the given user query."""

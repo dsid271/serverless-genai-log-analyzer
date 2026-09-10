@@ -17,7 +17,7 @@ class GeminiIncidentTriageAnalyzer:
                 "langchain_google_genai is not installed; use MODULE_SET=full or install optional deps"
             ) from e
 
-        self._llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key)
+        self._llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=api_key)
 
     async def analyze(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         incident = payload.get("incident", {})

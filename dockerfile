@@ -10,7 +10,8 @@ ARG MODULE_SET=full
 COPY requirements /app/requirements
 
 RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip install --no-cache-dir -r /app/requirements/${MODULE_SET}.txt
+    && python -m pip install --no-cache-dir -r /app/requirements/${MODULE_SET}.txt \
+    && (python -m spacy download en_core_web_sm || true)
 
 COPY . /app
 

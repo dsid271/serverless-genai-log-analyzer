@@ -1,22 +1,98 @@
+# processing/pii_profiles.yaml
+version: 2
+
+# ---- shared defaults (merged via YAML anchors) ------------------------------
+_defaults: &defaults
+  nlp_model: en_core_web_sm
+  score_threshold: 0.5
+
+  # Terms that look like PII to the NER model but are ours, not a person's.
+  allow_list:
+    - Bengaluru
+    - BGL-16
+    - Cisco
+    - localhost
+    - kubernetes
+    - log-analyzer
+    - logs-raw
+
+  # Internal ranges are not personal data and are needed for debugging.
+  ip_allow_prefixes: ["10.", "172.16.", "192.168.", "127.", "::1"]
+
+  operators:
+    DEFAULT:
+      type: replace
+      new_value: "[REDACTED]"
+    CREDIT_CARD:            # keep last 4 for support correlation
+      type: mask
+      masking_char: "*"
+      chars_to_mask: 12
+      from_end: false
+    US_SSN:
+      type: replace
+      new_value: "***-**-****"
+    IP_ADDRESS:
+      type: mask           # keep the /16 for geo/network triage
+      masking_char: "x"
+      chars_to_mask: 8
+      from_end: true
+
 profiles:
-  general:
-    entities: ["PERSON", "EMAIL_ADDRESS", "IP_ADDRESS", "LOCATION"]
+
+  # Fallback target. Must be a SUPERSET of every other profile.
+  strict:
+    <<: *defaults
     score_threshold: 0.4
-  
+    entities:
+      - PERSON
+      - EMAIL_ADDRESS
+      - PHONE_NUMBER
+      - IP_ADDRESS
+      - LOCATION
+      - CREDIT_CARD
+      - US_SSN
+      - IBAN_CODE
+      - US_BANK_NUMBER
+      - CRYPTO
+      - MEDICAL_LICENSE
+
+  general:
+    <<: *defaults
+    score_threshold: 0.4
+    entities: [PERSON, EMAIL_ADDRESS, IP_ADDRESS, LOCATION]
+
   financial:
-    entities: ["PERSON", "EMAIL_ADDRESS", "IP_ADDRESS", "CREDIT_CARD", "PHONE_NUMBER"]
+    <<: *defaults
     score_threshold: 0.5
-    custom_recognizers:
-      - name: "cc_pattern"
-        entity: "CREDIT_CARD"
-        regex: "\\b(?:\\d[ -]*?){13,16}\\b"
-        score: 0.8
-      - name: "phone_pattern"
-        entity: "PHONE_NUMBER"
-        regex: "(\\+?\\d{1,3}[-.\\s]?)?\\(?\\d{3}\\)?[-.\\s]?\\d{3}[-.\\s]?\\d{4}"
-        score: 0.7
+    entities:
+      - PERSON
+      - EMAIL_ADDRESS
+      - PHONE_NUMBER
+      - IP_ADDRESS
+      - LOCATION            # was missing; branch names leak location
+      - CREDIT_CARD         # built-in recognizer: Luhn-validated
+      - US_SSN              # was missing; belongs here more than in medical
+      - IBAN_CODE
+      - US_BANK_NUMBER
+      # - IN_PAN            # uncomment after confirming your presidio version
+      # - IN_AADHAAR
+    phone_regions: ["IN", "US"]
+    # No custom_recognizers. The built-ins are stricter than hand-rolled regex.
 
   medical:
-    entities: ["PERSON", "EMAIL_ADDRESS", "MEDICAL_LICENSE", "US_SSN", "DATE_TIME"]
-    score_threshold: 0.3
-    # In production, this would also include a specialized NLP model like 'en_core_sci_sm'
+    <<: *defaults
+    nlp_model: en_core_web_sm     # swap to en_core_sci_sm when available
+    score_threshold: 0.35
+    entities:
+      - PERSON
+      - EMAIL_ADDRESS
+      - PHONE_NUMBER
+      - MEDICAL_LICENSE
+      - US_SSN
+      - LOCATION
+      # DATE_TIME deliberately excluded — see date_policy below.
+    phone_regions: ["IN", "US"]
+    # Suppress dates without destroying the timeline: coarsen to month
+    # granularity in free text, leave the top-level timestamp untouched.
+    date_policy: coarsen_to_month
+    protected_fields: ["timestamp", "@timestamp", "ts", "event_time"]

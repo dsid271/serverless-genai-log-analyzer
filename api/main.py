@@ -66,7 +66,12 @@ def _build_orchestrator(event_bus: Optional[object] = None) -> SystemOrchestrato
     except Exception:
         from engine.null_analyzer import LogAnalysisEngine as Analyzer
 
-    redactor = Redactor(profile=redactor_profile)
+    try:
+        redactor = Redactor(profile=redactor_profile)
+    except Exception as e:
+        from processing.redactor_null import LogRedactor as NullRedactor
+        print(f"WARNING: real redactor unavailable ({e}); using null redactor")
+        redactor = NullRedactor(profile=redactor_profile)
     vector_store = VStore()
     storage = Lake()
     enricher = Enricher(redactor=redactor) if Enricher is not None else None
