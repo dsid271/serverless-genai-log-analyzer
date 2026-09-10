@@ -92,7 +92,7 @@ API_KEYS_FILE=./api/api_keys.yaml
 
 ### 3. Running the API
 ```powershell
-uv run uvicorn api.main:app --reload
+uv run uvicorn api.main:app --reload --reload-dir api --reload-dir core --reload-dir processing --reload-dir engine --reload-dir storage --reload-dir vector_db
 ```
 
 ---

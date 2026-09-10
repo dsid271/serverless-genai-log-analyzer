@@ -35,24 +35,31 @@ class AnalyzerRunner:
 
     async def _run(self) -> None:
         q = self._bus.queue()
+        print(f"RUNNER STARTED, enabled={self._enabled}", flush=True)
         while self._running:
-            event: Dict[str, Any] = await q.get()
-            incident = event.get("incident")
-            incident_id = event.get("incident_id")
-            if not incident or not incident_id:
-                continue
-
-            for name in self._enabled:
-                spec = self._registry.get("analyzer", name)
-                if spec is None:
+            try:
+                event: Dict[str, Any] = await q.get()
+                incident = event.get("incident")
+                incident_id = event.get("incident_id")
+                print(f"RUNNER: got {incident_id}", flush=True)
+                if not incident or not incident_id:
                     continue
 
-                try:
-                    analyzer = spec.factory()
-                    res = await analyzer.analyze({"incident": incident})
-                    attach = getattr(self._store, "attach_analysis", None)
-                    if callable(attach):
-                        attach(incident_id, res)
-                except Exception:
-                    # Analyzer failures should not stop the runner.
-                    continue
+                for name in self._enabled:
+                    spec = self._registry.get("analyzer", name)
+                    if spec is None:
+                        print(f"RUNNER: no spec for {name}", flush=True)
+                        continue
+                    try:
+                        analyzer = spec.factory()
+                        res = await analyzer.analyze({"incident": incident})
+                        attach = getattr(self._store, "attach_analysis", None)
+                        if callable(attach):
+                            attach(incident_id, res)
+                        print(f"RUNNER: attached {name}", flush=True)
+                    except Exception as e:
+                        print(f"ANALYZER FAILED [{name}]: {type(e).__name__}: {e}", flush=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"RUNNER LOOP ERROR: {type(e).__name__}: {e}", flush=True)

@@ -1,3 +1,4 @@
+import os
 from typing import Annotated, List
 from typing_extensions import TypedDict
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -24,7 +25,14 @@ class LogAnalysisEngine:
     """
     def __init__(self, gemini_api_key: str, vector_store: VectorStore):
         self.vector_store = vector_store
-        self._llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=gemini_api_key)
+        self.model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+        self.api_key = os.getenv("GEMINI_API_KEY")
+        self._llm = ChatGoogleGenerativeAI(
+            model=self.model,
+            google_api_key=self.api_key,
+            temperature=0,
+            max_output_tokens=2048,
+        )
         self.workflow = self._create_workflow()
 
     def _create_workflow(self):

@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request, Depends
 from api.orchestrator import SystemOrchestrator
-from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from pydantic import BaseModel, Field
+from typing import Literal, List, Dict, Any, Optional
 import os
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
@@ -21,6 +21,13 @@ from api.middleware import AuditLoggingMiddleware
 from api.audit import audit_logger
 load_dotenv()
 
+class Triage(BaseModel):
+    severity: Literal["low", "medium", "high"]
+    hypotheses: List[str] = Field(max_length=3)
+    mitigations: List[str] = Field(max_length=3)
+    next_steps: List[str] = Field(max_length=3)
+    impact: str = Field(max_length=200)
+    
 def _env_bool(name: str, default: bool = False) -> bool:
     val = os.getenv(name)
     if val is None:

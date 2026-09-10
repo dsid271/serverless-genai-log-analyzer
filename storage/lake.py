@@ -16,6 +16,23 @@ class DeltaLakeStorage:
         # Ensure the directory exists
         os.makedirs(os.path.dirname(self.table_path), exist_ok=True)
 
+    def _sanitize(record: dict) -> dict:
+    out = {}
+    for k, v in record.items():
+        if v is None:
+            continue                              # drop null-typed columns
+        elif isinstance(v, (list, tuple, set)):
+            if not v:
+                continue
+            out[k] = ",".join(map(str, v))
+        elif isinstance(v, dict):
+            continue
+        elif isinstance(v, (str, int, float, bool)):
+            out[k] = v
+        else:
+            out[k] = str(v)
+    return out
+
     def save_logs(self, logs: List[Dict[str, Any]]):
         """
         Saves a batch of logs to the Delta Table.
@@ -24,7 +41,7 @@ class DeltaLakeStorage:
         if not logs:
             return
 
-        df = pd.DataFrame(logs)
+        df = pd.DataFrame([_sanitize(r) for r in logs])
         
         try:
             # write_deltalake handles table creation if it doesn't exist
