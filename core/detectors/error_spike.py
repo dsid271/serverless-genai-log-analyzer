@@ -17,6 +17,7 @@ class ErrorSpikeDetector:
         self._incident_bus = incident_bus
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        self._samples: Deque[str] = deque(maxlen=5)
 
         self._window_seconds = int(os.getenv("ERROR_SPIKE_WINDOW_SECONDS", "60"))
         self._threshold = int(os.getenv("ERROR_SPIKE_THRESHOLD", "20"))
@@ -46,6 +47,7 @@ class ErrorSpikeDetector:
 
             now = time.time()
             self._events.append(now)
+            self._samples.append(str(event.get("message", ""))[:200])
 
             cutoff = now - self._window_seconds
             while self._events and self._events[0] < cutoff:
@@ -63,6 +65,8 @@ class ErrorSpikeDetector:
                     "count": len(self._events),
                     "cooldown_seconds": self._cooldown_seconds,
                     "contains_pii": contains_pii,
+                    "samples": list(self._samples),
+                    "sources": sorted({str(event.get("source", ""))}),
                 }
 
                 inc = self._store.add(
@@ -78,3 +82,5 @@ class ErrorSpikeDetector:
                     except Exception:
                         pass
                 self._events.clear()
+                self._samples.clear()
+                self._sources.clear()

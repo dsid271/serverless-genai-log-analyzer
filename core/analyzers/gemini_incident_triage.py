@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Literal
 from pydantic import BaseModel, Field
 
 _ALLOWED = ("kind", "message")
-_ALLOWED_DETAILS = ("window_seconds", "threshold", "count")
+_ALLOWED_DETAILS = ("window_seconds", "threshold", "count", "samples", "sources")
 
 SYSTEM = (
     "You are an on-call SRE triage assistant. "
