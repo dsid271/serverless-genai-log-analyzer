@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request, Depends
 from api.orchestrator import SystemOrchestrator
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
+import logging
 import os
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
@@ -67,7 +68,16 @@ def _build_orchestrator(event_bus: Optional[object] = None) -> SystemOrchestrato
         from engine.null_analyzer import LogAnalysisEngine as Analyzer
 
     redactor = Redactor(profile=redactor_profile)
-    vector_store = VStore()
+    try:
+        vector_store = VStore()
+    except Exception as exc:
+        # e.g. missing embedding API key: degrade to the in-memory store instead of crashing at import.
+        # Note: the redactor is intentionally NOT given a fallback; a null redactor would leak PII.
+        logging.getLogger(__name__).warning(
+            "VectorStore init failed (%s); using in-memory null store", exc
+        )
+        from vector_db.null_store import VectorStore as NullVStore
+        vector_store = NullVStore()
     storage = Lake()
     enricher = Enricher(redactor=redactor) if Enricher is not None else None
     if enricher is None:

@@ -27,9 +27,12 @@ jobs:
         run: uv run ruff check .
       - name: Check imports
         run: uv run python -m py_compile api/main.py
-      # Note: skipping pytest here by default to avoid downloading spacy models unless full test suite is desired.
-      # - name: Test
-      #   run: uv run pytest tests/
+      - name: Install spaCy model
+        run: uv pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+      - name: Test
+        env:
+          GEMINI_API_KEY: ci-dummy-key
+        run: uv run --no-sync pytest -q
 
   build_and_push:
     needs: test
