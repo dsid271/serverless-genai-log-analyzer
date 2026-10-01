@@ -53,16 +53,23 @@ def _load_keys() -> List[Dict[str, Any]]:
 
 def _verify_key(raw_key: str) -> Optional[User]:
     """Verify a raw API key against stored bcrypt hashes."""
+    # Uses the bcrypt library directly: passlib 1.7.4 is incompatible with bcrypt>=4.1
+    # (its backend self-test raises ValueError), which made every authenticated request fail.
     try:
-        from passlib.hash import bcrypt
+        import bcrypt
     except ImportError:
-        # passlib not installed — treat all keys as invalid
+        # bcrypt not installed - treat all keys as invalid
         return None
 
+    raw = raw_key.encode("utf-8")
     for entry in _load_keys():
         stored_hash = entry.get("key_hash", "")
-        if bcrypt.verify(raw_key, stored_hash):
-            return User(name=entry.get("name", "unknown"), role=entry.get("role", "viewer"))
+        try:
+            if bcrypt.checkpw(raw, stored_hash.encode("utf-8")):
+                return User(name=entry.get("name", "unknown"), role=entry.get("role", "viewer"))
+        except ValueError:
+            # Malformed stored hash, or a key longer than bcrypt's 72-byte limit: no match.
+            continue
     return None
 
 
