@@ -369,6 +369,14 @@ The opt-in Kafka connector (`core/connectors/kafka_connector.py`) reads JSON log
 - **Fail-safe**: if the broker is not reachable yet, the connector retries in the background and the API still starts.
 - **Manual ingestion**: `POST /ingest` accepts logs over HTTP and needs no broker.
 
+### Log-format profiles
+
+Different platforms name their fields differently (`_time`, `log_level`, `severityNumber`, nested `resource.service.name`, epoch timestamps). A **format profile** in `processing/format_profiles.yaml` maps those onto the internal fields `timestamp`, `severity`, `source` and `message` before redaction, storage and detection. Records already using the internal names pass through unchanged. PII rules are separate (`pii_profiles.yaml`).
+
+- **Built-in profiles**: `generic` (default), `siem_hec`, `acme_insight`, `acme_ai_platform`. The last two are fictional examples to copy from.
+- **Select one**: `LOG_FORMAT_PROFILE` (all channels), `KAFKA_FORMAT_PROFILE` (Kafka only), or `{"format": "acme_insight", "logs": [...]}` on `POST /ingest`. An unknown name returns 400 on the API and stops the Kafka connector from starting.
+- **Onboard a platform**: add a profile with candidate field paths (first non-empty wins), a `severity_map`, optional `timestamp_formats` and `defaults`. No code change. Use `FORMAT_PROFILES_PATH` to load a different file.
+
 Local broker with Docker Compose (single-node KRaft, `profiles: ["kafka"]`). The api service reaches it at `kafka:29092`, and host tools use `localhost:9092`:
 ```powershell
 # .env: ENABLED_CONNECTORS=kafka

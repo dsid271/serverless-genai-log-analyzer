@@ -28,6 +28,7 @@ from api.rate_limit import limiter, rate_limit_default, rate_limit_ingest, rate_
 from api.middleware import AuditLoggingMiddleware
 from api.audit import audit_logger
 from api.metrics import record_ingestion, render_latest
+from processing.format_profiles import DEFAULT_PROFILE, get_normalizer
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -104,10 +105,19 @@ orchestrator = _build_orchestrator(event_bus=event_bus)
 plugin_registry = PluginRegistry()
 
 
-def _make_ingest_callback(channel: str):
+def _make_ingest_callback(channel: str, format_profile: Optional[str] = None):
     """Wraps orchestrator.ingest_logs so streaming connectors report per-source
-    ingestion counters, same as the /ingest route. Takes a batch of logs."""
+    ingestion counters, same as the /ingest route. Takes a batch of logs.
+
+    `format_profile` (processing/format_profiles.yaml) maps the platform's field
+    names onto the internal schema first; an unknown name fails at startup."""
+    normalizer = get_normalizer()
+    format_profile = format_profile or DEFAULT_PROFILE
+    if not normalizer.has(format_profile):
+        raise ValueError(f"unknown format profile {format_profile!r}; available: {normalizer.names()}")
+
     async def _callback(raw_logs):
+        raw_logs = normalizer.normalize_batch(raw_logs, format_profile)
         result = await orchestrator.ingest_logs(raw_logs)
         record_ingestion(
             channel=channel,
@@ -124,7 +134,7 @@ plugin_registry.register(
         name="kafka",
         kind="connector",
         factory=lambda: __import__("core.connectors.kafka_connector", fromlist=["KafkaConnector"]).KafkaConnector(
-            _make_ingest_callback("kafka")
+            _make_ingest_callback("kafka", os.getenv("KAFKA_FORMAT_PROFILE") or os.getenv("LOG_FORMAT_PROFILE"))
         ),
     )
 )
@@ -273,6 +283,8 @@ app.add_middleware(AuditLoggingMiddleware)
 
 class LogIngestRequest(BaseModel):
     logs: List[Dict[str, Any]]
+    # Name from processing/format_profiles.yaml; defaults to LOG_FORMAT_PROFILE or "generic".
+    format: Optional[str] = Field(default=None, max_length=100)
 
 class AnalysisRequest(BaseModel):
     query: str
@@ -281,12 +293,17 @@ class AnalysisRequest(BaseModel):
 @limiter.limit(rate_limit_ingest)
 async def ingest_logs(request: Request, body: LogIngestRequest, user: User = Depends(require_scope("logs:ingest"))):
     """Manual API ingestion route (for fallback)."""
-    response = await orchestrator.ingest_logs(body.logs)
+    normalizer = get_normalizer()
+    profile = body.format or os.getenv("LOG_FORMAT_PROFILE") or DEFAULT_PROFILE
+    if not normalizer.has(profile):
+        raise HTTPException(status_code=400, detail=f"Unknown format profile {profile!r}. Available: {normalizer.names()}")
+    logs = normalizer.normalize_batch(body.logs, profile)
+    response = await orchestrator.ingest_logs(logs)
     request.state.results_count = response.get("count", 0)
     contains_pii = bool(response.get("contains_pii", False))
     request.state.pii_accessed = contains_pii
     request.state.contains_pii = contains_pii
-    record_ingestion(channel="api", sources=[log.get("source") for log in body.logs], contains_pii=contains_pii)
+    record_ingestion(channel="api", sources=[log.get("source") for log in logs], contains_pii=contains_pii)
     return response
 
 @app.post("/analyze", tags=["Analysis"])
