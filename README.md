@@ -151,7 +151,7 @@ Each key is issued from a **profile**, which sets its scopes and default expiry:
 
 | Profile | Scopes | Default TTL |
 |---|---|---|
-| `admin` | all, including `keys:admin` and `audit:read` | 30 days |
+| `admin` | all, including `keys:admin`, `pii:admin` and `audit:read` | 30 days |
 | `analyst` | ingest, search, analyze, read incidents/summary/plugins, `incidents:feedback`, `knowledge:write` | 90 days |
 | `ingest-service` | `logs:ingest` | 365 days |
 | `deploy-webhook` | `events:write` | 365 days |
@@ -165,6 +165,9 @@ uv run python scripts/manage_keys.py list
 uv run python scripts/manage_keys.py revoke <key_id>
 ```
 - `POST /admin/keys` (`{"name": ..., "profile": ..., "ttl_days": ...}`), `GET /admin/keys`, `DELETE /admin/keys/{key_id}` — all need `keys:admin`.
+- `POST /admin/keys` also needs `ENABLE_AUTH=true` and returns 403 otherwise: with auth off every caller is anonymous, and a key minted then would stay valid once auth is on. Use the CLI to bootstrap.
+- Each key records `issued_by`: the issuing key (`name:key_id`) for the API, `cli:<os user>` for the CLI. It is shown by `manage_keys.py list` and `GET /admin/keys`. PII rule decisions record the deciding key the same way.
+- `GET /admin/pii-rules?status=pending|approved|rejected|collecting|all` and `POST /admin/pii-rules/decisions` (`{"ids": [...], "status": "approved"|"rejected"|"pending"}`) need `pii:admin`. See [PII rule suggestions](#throughput-settings).
 - Expired or revoked keys get 401. A valid key without the needed scope gets 403.
 
 ---
@@ -374,6 +377,7 @@ The opt-in Kafka connector (`core/connectors/kafka_connector.py`) reads JSON log
 - **`VECTOR_INDEX_MODE`** (default `pattern`): Chroma embedding costs about 0.3 s per log on CPU. In `pattern` mode only the first log of each message pattern is embedded (ids, IPs and numbers are masked to find the pattern, per source and severity), and again after `VECTOR_PATTERN_TTL_SECONDS`. Semantic search then returns one example per pattern, not every repeat. Set `all` to embed every log. Delta Lake stores every log in both modes.
 - **`NER_CACHE_SIZE`** (default `4096`): Presidio results are cached by exact text, so repeated messages skip the NER pass with no loss of coverage. `0` disables it.
 - **`PII_LEARNING`** (default `true`): names and places that NER detects (`PII_LEARN_ENTITIES`) are added to the rule tier once seen `PII_LEARN_MIN_HITS` times. Rules-only paths (NER unavailable, or `use_ner=False`) then mask them too. Only keyed hashes (`PII_PSEUDONYM_KEY`) are stored in `PII_LEARNED_DB`, never the text. Terms on the profile's `allow_list` are never learned. Readers pick up new entries every `PII_LEARNED_RELOAD_SECONDS`.
+- **`PII_RULE_SUGGESTIONS`** (default `true`): learns *where* NER finds entities, so new values in the same place are caught too. Each NER hit turns the (already rule-redacted) message into a shape with the entity as a slot, for example `profile update failed for {PERSON}, order <n> from <ip>`. Once `PII_SUGGEST_MIN_DISTINCT` (default `5`) different values were seen in that slot, the suggestion becomes `pending`. A reviewer approves or rejects it on the page `/ui/pii-rules` (enter a `pii:admin` key when `ENABLE_AUTH=true`) or through the `/admin/pii-rules` API. Approved rules redact the slot in every matching message in the rule tier, so the API and Spark both apply them. Only shapes, counts and keyed hashes of slot values are stored, in `PII_LEARNED_DB`. Only `PII_LEARN_ENTITIES` types and messages up to 500 characters are used. `/metrics` exports `pii_rule_suggestions{status=...}`, so a Grafana panel can show waiting suggestions.
 
 ### Log-format profiles
 
@@ -411,7 +415,7 @@ docker compose --profile kafka --profile spark up -d kafka spark api
 ```
 
 - **Runtime**: one container (`Dockerfile.spark`, Java 21, `local[*]`). The Kafka and Delta jars download on first start and are cached in the `spark-ivy` volume. The Spark UI is on http://localhost:4040.
-- **Shared state**: the container reads `.env` and `./data/learned_pii.sqlite3`. `PII_PSEUDONYM_KEY` must match the api so learned entities apply.
+- **Shared state**: the container reads `.env` and `./data/learned_pii.sqlite3`. `PII_PSEUDONYM_KEY` must match the api so learned entities apply. Approved PII rule suggestions in the same file apply too.
 - **Delta tables**: in Compose, Spark writes `/spark-data/delta-lake/logs_stream` and its checkpoints in the `spark-data` volume, not in `./data`. Each batch writes many small files, which is slow on a host bind mount (measured on a OneDrive folder: ~150 s lag vs ~50 s in a volume). This table is separate from the api's `data/delta-lake/logs`.
 - **Other settings**: `SPARK_TRIGGER` (`10 seconds`), `SPARK_MAX_OFFSETS_PER_TRIGGER` (200000), `SPARK_KAFKA_MIN_PARTITIONS` (number of cores), `SPARK_STARTING_OFFSETS` (`latest`), `SPARK_FORMAT_PROFILE`, `SPARK_CHECKPOINT_DIR`, `SPARK_SPIKE_OUTPUT_MODE` (`update` = alert as soon as a window crosses the threshold; `append` = once, after the watermark passes).
 - **Load test**: `uv run python scripts/load_test.py --rate 2000 --duration 30` sends synthetic logs (fake PII) to `logs-raw` and reads the Spark UI until the `logs` query has processed them. It reports producer rate, end-to-end throughput and lag after the last send. Start it after the job is up: with `SPARK_STARTING_OFFSETS=latest` a fresh job skips logs sent before its first batch. `--delta <host path>` also counts this run's rows in the table when `SPARK_DELTA_PATH` is on the host.
@@ -431,7 +435,7 @@ Like the rest of the plugin system, this degrades gracefully: if `prometheus-cli
 1. Install the extra: `uv sync --extra observability` (already bundled in `requirements/full.txt` for Docker builds)
 2. Start the stack: `docker compose up -d prometheus grafana` (or `docker compose up -d` to include the API too)
 3. Prometheus UI: http://localhost:9090 (scrapes `api:8000/metrics` every 5s — see `observability/prometheus.yml`)
-4. Grafana UI: http://localhost:3000 (default login `admin`/`admin`, anonymous viewer access enabled) — a "GenAI Log Analyzer - API Overview" dashboard is auto-provisioned (`observability/grafana/dashboards/api-overview.json`) with request rate, p95 latency, ingestion rate by source, and PII-detection rate panels.
+4. Grafana UI: http://localhost:3000 (default login `admin`/`admin`, anonymous viewer access enabled) — a "GenAI Log Analyzer - API Overview" dashboard is auto-provisioned (`observability/grafana/dashboards/api-overview.json`) with request rate, p95 latency, ingestion rate by source, PII-detection rate, and PII rule suggestions by status panels.
 
 Prometheus scrapes `api:8000`, which resolves only to the `api` service in this compose file. If you run the API on your host with `uvicorn`, Prometheus will not reach it unless you change the target in `observability/prometheus.yml` (for example, to `host.docker.internal:8000`). This stack has not been verified end to end.
 

@@ -4,7 +4,8 @@ API Key Authentication & scope-based authorization for the GenAI Log Analyzer.
 - Keys are issued per profile and stored in SQLite (see api/key_store.py).
   Issue them with `scripts/manage_keys.py` or `POST /admin/keys`.
 - Auth is opt-in: set ENABLE_AUTH=true to enforce. When disabled, all requests
-  are treated as an anonymous user with every scope.
+  are treated as an anonymous user with every scope, except that `POST /admin/keys`
+  refuses anonymous callers.
 """
 
 from __future__ import annotations

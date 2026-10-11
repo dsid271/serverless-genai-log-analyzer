@@ -36,6 +36,7 @@ SCOPES: FrozenSet[str] = frozenset({
     "plugins:read",
     "audit:read",
     "keys:admin",
+    "pii:admin",
 })
 
 # profile -> (scopes, default TTL in days; None means no expiry)
@@ -61,7 +62,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at   REAL NOT NULL,
     expires_at   REAL,
     revoked_at   REAL,
-    last_used_at REAL
+    last_used_at REAL,
+    issued_by    TEXT
 )
 """
 
@@ -76,6 +78,7 @@ class KeyRecord:
     expires_at: Optional[float]
     revoked_at: Optional[float]
     last_used_at: Optional[float]
+    issued_by: Optional[str] = None
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -87,6 +90,7 @@ class KeyRecord:
             "expires_at": self.expires_at,
             "revoked_at": self.revoked_at,
             "last_used_at": self.last_used_at,
+            "issued_by": self.issued_by,
         }
 
 
@@ -109,6 +113,9 @@ class KeyStore:
         os.makedirs(parent, exist_ok=True)
         with self._connect() as conn:
             conn.execute(_SCHEMA)
+            columns = {r["name"] for r in conn.execute("PRAGMA table_info(api_keys)")}
+            if "issued_by" not in columns:
+                conn.execute("ALTER TABLE api_keys ADD COLUMN issued_by TEXT")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -131,10 +138,15 @@ class KeyStore:
             expires_at=row["expires_at"],
             revoked_at=row["revoked_at"],
             last_used_at=row["last_used_at"],
+            issued_by=row["issued_by"],
         )
 
-    def issue(self, name: str, profile: str, ttl_days: Optional[int] = None) -> Tuple[str, KeyRecord]:
-        """Create a key. Returns (plaintext_key, record). The plaintext is not stored."""
+    def issue(
+        self, name: str, profile: str, ttl_days: Optional[int] = None, issued_by: Optional[str] = None,
+    ) -> Tuple[str, KeyRecord]:
+        """Create a key. Returns (plaintext_key, record). The plaintext is not stored.
+
+        `issued_by` records who created it (the issuing key's identity, or the OS user for the CLI)."""
         if profile not in PROFILES:
             raise ValueError(f"Unknown profile '{profile}'. Choose from: {sorted(PROFILES)}")
         if not name.strip():
@@ -150,11 +162,11 @@ class KeyStore:
         expires_at = now + ttl * 86400 if ttl is not None else None
         with self._lock, self._connect() as conn:
             conn.execute(
-                "INSERT INTO api_keys (key_id, name, profile, scopes, secret_hash, created_at, expires_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (key_id, name.strip(), profile, " ".join(sorted(scopes)), _digest(secret), now, expires_at),
+                "INSERT INTO api_keys (key_id, name, profile, scopes, secret_hash, created_at, expires_at, issued_by)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (key_id, name.strip(), profile, " ".join(sorted(scopes)), _digest(secret), now, expires_at, issued_by),
             )
-        record = KeyRecord(key_id, name.strip(), profile, scopes, now, expires_at, None, None)
+        record = KeyRecord(key_id, name.strip(), profile, scopes, now, expires_at, None, None, issued_by)
         return f"{KEY_PREFIX}_{key_id}_{secret}", record
 
     def verify(self, raw_key: str) -> Optional[KeyRecord]:

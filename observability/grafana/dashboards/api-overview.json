@@ -58,6 +58,19 @@
           "legendFormat": "PII-containing requests"
         }
       ]
+    },
+    {
+      "id": 5,
+      "title": "PII rule suggestions by status",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum(pii_rule_suggestions) by (status)",
+          "legendFormat": "{{status}}"
+        }
+      ]
     }
   ]
 }

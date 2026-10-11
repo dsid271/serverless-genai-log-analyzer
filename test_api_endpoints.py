@@ -115,6 +115,7 @@ def test_key_issuance_scopes_expiry_and_revocation(monkeypatch, tmp_path):
     assert issued.status_code == 201, issued.text
     body = issued.json()
     assert body["scopes"] == ["logs:ingest"]
+    assert body["issued_by"] == f"bootstrap-admin:{admin_key.split('_')[1]}"
     ingest_only = {"X-API-Key": body["api_key"]}
 
     # Scope enforcement: ingest-service can ingest but cannot read incidents.
@@ -134,11 +135,58 @@ def test_key_issuance_scopes_expiry_and_revocation(monkeypatch, tmp_path):
     assert client.get("/plugins", headers=ingest_only).status_code == 401
     assert client.delete(f"/admin/keys/{body['key_id']}", headers=admin).status_code == 404
 
+    # With auth off every caller is anonymous; it must not be able to mint keys.
+    monkeypatch.setenv("ENABLE_AUTH", "false")
+    anon = client.post("/admin/keys", json={"name": "sneaky", "profile": "admin"})
+    assert anon.status_code == 403
+    assert "sneaky" not in {k.name for k in get_key_store().list()}
+    monkeypatch.setenv("ENABLE_AUTH", "true")
+
     store = KeyStore(str(tmp_path / "expiry.sqlite3"))
     raw, rec = store.issue("short-lived", "viewer", ttl_days=1)
     assert store.verify(raw) is not None
     monkeypatch.setattr(time, "time", lambda: rec.expires_at + 1)
     assert store.verify(raw) is None
+
+
+def test_pii_rule_review_endpoints(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from api.key_store import get_key_store
+    from api.main import orchestrator
+    from processing.pii_rules import PiiRuleStore
+
+    store = PiiRuleStore(str(tmp_path / "rules.sqlite3"), b"k", entities=["PERSON"], min_distinct=2)
+    for name in ("Maria Gonzalez", "John Smith"):
+        text = f"refund denied for {name}"
+        start = text.index(name)
+        store.observe(text, [SimpleNamespace(entity_type="PERSON", start=start, end=start + len(name))])
+    monkeypatch.setattr(orchestrator.enricher.redactor, "pii_rules", store)
+    monkeypatch.setenv("API_KEYS_DB", str(tmp_path / "keys.sqlite3"))
+    monkeypatch.setenv("ENABLE_AUTH", "true")
+    admin = {"X-API-Key": get_key_store().issue("admin", "admin")[0]}
+    analyst = {"X-API-Key": get_key_store().issue("analyst", "analyst")[0]}
+
+    client = TestClient(app)
+    assert client.get("/admin/pii-rules", headers=analyst).status_code == 403
+    listed = client.get("/admin/pii-rules", headers=admin)
+    assert listed.status_code == 200, listed.text
+    [rule] = listed.json()["rules"]
+    assert rule["display"] == "refund denied for {PERSON}" and listed.json()["counts"]["pending"] == 1
+    assert client.get("/admin/pii-rules?status=bogus", headers=admin).status_code == 400
+
+    body = {"ids": [rule["id"], "missing"], "status": "approved"}
+    decided = client.post("/admin/pii-rules/decisions", headers=admin, json=body)
+    assert decided.status_code == 200, decided.text
+    assert decided.json()["updated"][0]["status"] == "approved" and decided.json()["not_found"] == ["missing"]
+    assert decided.json()["updated"][0]["decided_by"].startswith("admin:")
+    bad = client.post("/admin/pii-rules/decisions", headers=admin, json={"ids": [rule["id"]], "status": "x"})
+    assert bad.status_code == 422
+    assert store.apply("Refund denied for Zed Quux") == ("Refund denied for [REDACTED]", True)
+
+    assert "text/html" in client.get("/ui/pii-rules").headers["content-type"]
+    metrics = client.get("/metrics").text
+    if "disabled" not in metrics:
+        assert 'pii_rule_suggestions{status="approved"} 1.0' in metrics
 
 
 def test_ticket_dispatcher_open_update_resolve_and_retry(tmp_path):

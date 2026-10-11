@@ -27,7 +27,8 @@ from api.key_store import PROFILES, get_key_store
 from api.rate_limit import limiter, rate_limit_default, rate_limit_ingest, rate_limit_analyze
 from api.middleware import AuditLoggingMiddleware
 from api.audit import audit_logger
-from api.metrics import record_ingestion, render_latest
+from api.metrics import record_ingestion, record_pii_rule_counts, render_latest
+from fastapi.responses import FileResponse
 from processing.format_profiles import DEFAULT_PROFILE, get_normalizer
 load_dotenv()
 
@@ -329,6 +330,9 @@ async def analyze_logs(request: Request, body: AnalysisRequest, user: User = Dep
 async def metrics():
     """Prometheus scrape endpoint. Returns a plain-text disabled notice if
     `prometheus_client` isn't installed (see api/metrics.py)."""
+    store = _pii_rule_store()
+    if store is not None:
+        record_pii_rule_counts(store.counts())
     body, content_type = render_latest()
     return Response(content=body, media_type=content_type)
 
@@ -558,9 +562,19 @@ async def list_key_profiles(request: Request, user: User = Depends(require_scope
 @app.post("/admin/keys", tags=["Admin"], status_code=201)
 @limiter.limit(rate_limit_default)
 async def issue_api_key(request: Request, body: KeyIssueRequest, user: User = Depends(require_scope("keys:admin"))):
-    """Issue a key for a profile. The plaintext key is returned once and never stored."""
+    """Issue a key for a profile. The plaintext key is returned once and never stored.
+
+    Requires ENABLE_AUTH=true: with auth off any caller is anonymous, and a key minted then
+    would stay valid after auth is turned on. Use scripts/manage_keys.py instead."""
+    if user.key_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Issuing keys over the API requires ENABLE_AUTH=true. Use scripts/manage_keys.py.",
+        )
     try:
-        raw_key, record = get_key_store().issue(body.name, body.profile, body.ttl_days)
+        raw_key, record = get_key_store().issue(
+            body.name, body.profile, body.ttl_days, issued_by=request.state.user_identity,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"api_key": raw_key, **record.to_dict()}
@@ -578,3 +592,56 @@ async def revoke_api_key(request: Request, key_id: str, user: User = Depends(req
     if not get_key_store().revoke(key_id):
         raise HTTPException(status_code=404, detail="Key not found or already revoked.")
     return {"key_id": key_id, "revoked": True}
+
+
+def _pii_rule_store():
+    """Writable rule store of the API's redactor, or None when suggestions are off."""
+    redactor = getattr(orchestrator.enricher, "redactor", None)
+    store = getattr(redactor, "pii_rules", None)
+    return store if store is not None and not store.read_only else None
+
+
+def _require_pii_rule_store():
+    store = _pii_rule_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="PII rule suggestions are disabled (PII_RULE_SUGGESTIONS).")
+    return store
+
+
+class PiiRuleDecision(BaseModel):
+    ids: List[str] = Field(min_length=1, max_length=500)
+    status: Literal["approved", "rejected", "pending"]
+
+
+@app.get("/admin/pii-rules", tags=["Admin"])
+@limiter.limit(rate_limit_default)
+async def list_pii_rules(
+    request: Request,
+    status: Optional[str] = "pending",
+    limit: int = 100,
+    user: User = Depends(require_scope("pii:admin")),
+):
+    """Suggested PII rules. `status`: collecting, pending, approved, rejected, or all."""
+    from processing.pii_rules import STATUSES as RULE_STATUSES
+    store = _require_pii_rule_store()
+    if status == "all":
+        status = None
+    elif status not in RULE_STATUSES:
+        raise HTTPException(status_code=400, detail=f"status must be 'all' or one of {list(RULE_STATUSES)}")
+    return {"rules": store.list(status=status, limit=limit), "counts": store.counts()}
+
+
+@app.post("/admin/pii-rules/decisions", tags=["Admin"])
+@limiter.limit(rate_limit_default)
+async def decide_pii_rules(request: Request, body: PiiRuleDecision, user: User = Depends(require_scope("pii:admin"))):
+    """Approve, reject or reset (`pending`) suggestions. Approved rules apply in the rule tier (API and Spark)."""
+    store = _require_pii_rule_store()
+    rules = store.decide(body.ids, body.status, by=request.state.user_identity)
+    found = {r["id"] for r in rules}
+    return {"updated": rules, "not_found": sorted(set(body.ids) - found)}
+
+
+@app.get("/ui/pii-rules", include_in_schema=False)
+async def pii_rules_page():
+    """Review page; it calls /admin/pii-rules with the key entered on the page."""
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "pii_rules.html"))

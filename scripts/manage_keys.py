@@ -14,6 +14,7 @@ Use this to create the first admin key; after that, `POST /admin/keys` works too
 from __future__ import annotations
 
 import argparse
+import getpass
 import os
 import sys
 from datetime import datetime, timezone
@@ -27,6 +28,13 @@ def _fmt(ts):
     if ts is None:
         return "-"
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _os_user() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:
+        return "unknown"
 
 
 def main() -> int:
@@ -51,7 +59,7 @@ def main() -> int:
 
     if args.cmd == "issue":
         try:
-            raw_key, rec = store.issue(args.name, args.profile, args.ttl_days)
+            raw_key, rec = store.issue(args.name, args.profile, args.ttl_days, issued_by=f"cli:{_os_user()}")
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
@@ -66,7 +74,8 @@ def main() -> int:
         for rec in store.list(include_revoked=args.all):
             status = "revoked" if rec.revoked_at else "active"
             print(f"{rec.key_id}  {status:<7}  {rec.profile:<14}  {rec.name:<20}  "
-                  f"expires={_fmt(rec.expires_at)}  last_used={_fmt(rec.last_used_at)}")
+                  f"expires={_fmt(rec.expires_at)}  last_used={_fmt(rec.last_used_at)}  "
+                  f"issued_by={rec.issued_by or '-'}")
         return 0
 
     if args.cmd == "revoke":

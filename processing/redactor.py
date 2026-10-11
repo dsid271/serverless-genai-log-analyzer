@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from processing.learned_pii import LearnedEntities
+from processing.pii_rules import PiiRuleStore
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +60,12 @@ def _mask_email(match: re.Match) -> str:
 class RuleRedactor:
     """Fast, deterministic, zero-dependency. The floor that always applies.
 
-    `learned` (processing/learned_pii.py) adds entities that NER found earlier."""
+    `learned` (processing/learned_pii.py) adds entities that NER found earlier.
+    `pii_rules` (processing/pii_rules.py) adds approved per-pattern slot rules."""
 
-    def __init__(self, learned: Optional[Any] = None):
+    def __init__(self, learned: Optional[Any] = None, pii_rules: Optional[Any] = None):
         self.learned = learned
+        self.pii_rules = pii_rules
 
     def apply(self, text: str) -> Tuple[str, bool]:
         original = text
@@ -71,6 +74,8 @@ class RuleRedactor:
         text = EMAIL_RE.sub(_mask_email, text)
         if self.learned is not None:
             text, _ = self.learned.apply(text)
+        if self.pii_rules is not None:
+            text, _ = self.pii_rules.apply(text)
         return text, text != original
 
 
@@ -145,10 +150,12 @@ class LogRedactor:
         self.ip_allow = tuple(self.config.get("ip_allow_prefixes", []))
         # Without NER nothing new is learned; the store is only read.
         self.learned = LearnedEntities.from_env(self._key, self.allow_list, read_only=not use_ner)
-        self.rules = RuleRedactor(self.learned)
+        self.pii_rules = PiiRuleStore.from_env(self._key, read_only=not use_ner)
+        self.rules = RuleRedactor(self.learned, self.pii_rules)
         if not use_ner:
-            logger.info("NER disabled by caller; rules-only mode (learned entities: %s).",
-                        "on" if self.learned is not None else "off")
+            logger.info("NER disabled by caller; rules-only mode (learned entities: %s, pii rules: %s).",
+                        "on" if self.learned is not None else "off",
+                        "on" if self.pii_rules is not None else "off")
             return
         try:
             self.operators = self._build_operators(self.config)
@@ -230,6 +237,8 @@ class LogRedactor:
             results = [r for r in results if not self._is_internal_ip(text, r)]
             if self.learned is not None:
                 self.learned.observe(text, results)
+            if self.pii_rules is not None:
+                self.pii_rules.observe(text, results)
             ner_changed = False
             if results:
                 text = self.anonymizer.anonymize(

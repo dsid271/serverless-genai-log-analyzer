@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from processing.learned_pii import LearnedEntities
+from processing.pii_rules import PiiRuleStore
 from processing.redactor import LogRedactor
 
 
@@ -120,6 +121,58 @@ def test_rules_only_redactor_applies_learned_entities(monkeypatch, tmp_path):
     clean = redactor.redact_log({"message": "chargeback by Maria Gonzalez"})
     assert clean["message"] == "chargeback by [REDACTED]"
     assert clean["contains_pii"] is True and clean["redaction_mode"] == "rules-only"
+
+
+_NAMES = ["Maria Gonzalez", "John Smith", "Ana Li", "Bob Stone", "Ana Li"]
+
+
+def _observe_names(store, names=_NAMES):
+    for i, name in enumerate(names):
+        text = f"profile update failed for {name}, order 12{i}34 from 10.0.0.{i}"
+        store.observe(text, [_hit(text, name)])
+
+
+def test_pii_rule_suggestion_needs_distinct_values_and_stores_no_raw_text(tmp_path):
+    db = str(tmp_path / "learned.sqlite3")
+    store = PiiRuleStore(db, b"k", entities=["PERSON"], min_distinct=4, reload_seconds=0)
+    _observe_names(store, _NAMES[:3])
+    assert store.counts()["collecting"] == 1 and store.list("pending") == []
+
+    _observe_names(store, _NAMES[3:])
+    [rule] = store.list("pending")
+    assert rule["hits"] == 5 and rule["distinct_values"] == 4 and rule["entity"] == "PERSON"
+    assert rule["display"] == "profile update failed for {PERSON}, order <n> from <ip>"
+    raw = open(db, "rb").read().lower()
+    assert b"gonzalez" not in raw and b"smith" not in raw and b"stone" not in raw
+
+    # Not recorded: entity type not learned, too many slots, or text too long.
+    t = "login from Madrid failed"
+    store.observe(t, [_hit(t, "Madrid", "LOCATION")])
+    store.observe("x " * 300, [_hit("x " * 300, "x")])
+    assert sum(store.counts().values()) == 1
+
+
+def test_approved_pii_rule_applies_in_rules_only_readers(monkeypatch, tmp_path):
+    monkeypatch.setenv("PII_LEARNED_RELOAD_SECONDS", "0")
+    monkeypatch.setenv("PII_PSEUDONYM_KEY", "test-key")
+    monkeypatch.setenv("PII_SUGGEST_MIN_DISTINCT", "3")
+    teacher = PiiRuleStore.from_env(b"test-key")
+    _observe_names(teacher)
+    rid = teacher.list("pending")[0]["id"]
+
+    text = "Profile update failed for Zed Quux, order 999 from 10.1.2.3"
+    redactor = LogRedactor(profile="financial", use_ner=False)
+    assert redactor.redact_log({"message": text})["message"] == text
+
+    assert teacher.decide([rid], "approved", by="tester")[0]["decided_by"] == "tester"
+    assert redactor.redact_log({"message": text})["message"] == (
+        "Profile update failed for [REDACTED], order 999 from 10.1.2.3")
+    assert redactor.rules.apply("unrelated text for Zed Quux") == ("unrelated text for Zed Quux", False)
+
+    teacher.decide([rid], "rejected", by="tester")
+    assert redactor.redact_log({"message": text})["message"] == text
+    with pytest.raises(ValueError):
+        teacher.decide([rid], "collecting", by="tester")
 
 
 if __name__ == "__main__":

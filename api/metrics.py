@@ -8,7 +8,7 @@ storage, vector store, analyzer all degrade the same way).
 """
 from __future__ import annotations
 
-from typing import Iterable, Set, Tuple
+from typing import Iterable, Mapping, Set, Tuple
 
 # Caps label cardinality: each distinct log `source` becomes a time series.
 _MAX_SOURCE_LABELS = 200
@@ -16,7 +16,7 @@ _MAX_SOURCE_LEN = 64
 _seen_sources: Set[str] = set()
 
 try:
-    from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+    from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 
     METRICS_ENABLED = True
 
@@ -39,6 +39,11 @@ try:
         "logs_pii_redacted_total",
         "Total number of ingested log records that contained PII",
     )
+    PII_RULE_SUGGESTIONS = Gauge(
+        "pii_rule_suggestions",
+        "PII rule suggestions by review status (collecting/pending/approved/rejected)",
+        ["status"],
+    )
 
 except ImportError:  # pragma: no cover - exercised only when dep is absent
     METRICS_ENABLED = False
@@ -46,6 +51,7 @@ except ImportError:  # pragma: no cover - exercised only when dep is absent
     HTTP_REQUEST_DURATION_SECONDS = None
     LOGS_INGESTED_TOTAL = None
     LOGS_PII_REDACTED_TOTAL = None
+    PII_RULE_SUGGESTIONS = None
 
 
 def record_request(method: str, path: str, status_code: int, duration_seconds: float) -> None:
@@ -81,6 +87,13 @@ def record_ingestion(channel: str, sources: Iterable[object], contains_pii: bool
         LOGS_INGESTED_TOTAL.labels(channel=channel, source=label).inc(n)
     if contains_pii:
         LOGS_PII_REDACTED_TOTAL.inc()
+
+
+def record_pii_rule_counts(counts: Mapping[str, int]) -> None:
+    if not METRICS_ENABLED:
+        return
+    for status, n in counts.items():
+        PII_RULE_SUGGESTIONS.labels(status=status).set(n)
 
 
 def render_latest() -> Tuple[bytes, str]:
