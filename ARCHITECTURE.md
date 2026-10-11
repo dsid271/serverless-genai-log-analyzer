@@ -158,7 +158,7 @@ Mask sensitive data before storage/analysis:
 
 **Implementation**:
 - Use regex + ML-based detection (Presidio library)
-- Maintain accuracy >99% (minimize false positives)
+- Target: minimize false positives and missed PII (precision/recall not yet measured; no evaluation set exists)
 - Log all PII redactions for audit
 
 ```python

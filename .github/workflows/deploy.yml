@@ -27,9 +27,9 @@ jobs:
         run: uv run ruff check .
       - name: Check imports
         run: uv run python -m py_compile api/main.py
-      # Note: skipping pytest here by default to avoid downloading spacy models unless full test suite is desired.
-      # - name: Test
-      #   run: uv run pytest tests/
+      # The spaCy model is not installed in CI, so redactor tests run in rules-only mode.
+      - name: Test
+        run: uv run pytest test_api_endpoints.py test_audit.py test_redactor.py test_error_spike.py -q
 
   build_and_push:
     needs: test
