@@ -1,34 +1,40 @@
 import asyncio
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 logger = logging.getLogger("KafkaConsumer")
 
 
+def _decode(raw: bytes) -> Optional[Dict[str, Any]]:
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 class LogConsumer:
-    """Async Kafka consumer: ingests logs, redacts PII, hands off to orchestrator."""
+    """Async Kafka consumer: hands each polled batch of decoded logs to `on_batch`.
+
+    Redaction happens downstream in the orchestrator's enricher, the same path
+    as `POST /ingest`. Offsets are committed only after `on_batch` succeeds
+    (at-least-once delivery).
+    """
 
     def __init__(
         self,
-        orchestrator,
+        on_batch: Callable[[List[Dict[str, Any]]], Awaitable[Any]],
         topic: str = "logs-raw",
         bootstrap_servers: str = "localhost:9092",
         group_id: str = "log-analyzer-group",
-        redactor_profile: str = "financial",
+        max_batch: int = 500,
     ):
-        self.orchestrator = orchestrator
+        self.on_batch = on_batch
         self.topic = topic
         self.bootstrap_servers = bootstrap_servers
         self.group_id = group_id
-
-        try:
-            from processing.redactor import LogRedactor
-        except Exception:
-            logger.warning("Primary redactor unavailable; falling back to null redactor.")
-            from processing.redactor_null import LogRedactor
-
-        self.redactor = LogRedactor(profile=redactor_profile)
+        self.max_batch = max_batch
         self.consumer: Optional[Any] = None
         self._running = False
 
@@ -45,8 +51,7 @@ class LogConsumer:
             bootstrap_servers=self.bootstrap_servers,
             group_id=self.group_id,
             auto_offset_reset="earliest",
-            enable_auto_commit=True,
-            value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+            enable_auto_commit=False,
             request_timeout_ms=5000,
         )
 
@@ -69,16 +74,29 @@ class LogConsumer:
             return
 
         try:
-            async for msg in self.consumer:
-                if not self._running:
-                    break
-                try:
-                    clean_log = self.redactor.redact_log(msg.value)
-                    await self.orchestrator.ingest_single_log(clean_log)
-                except json.JSONDecodeError:
-                    logger.warning(f"Skipping malformed JSON at offset {msg.offset}")
-                except Exception as e:
-                    logger.error(f"Error processing message at offset {msg.offset}: {e}")
+            while self._running:
+                polled = await self.consumer.getmany(timeout_ms=1000, max_records=self.max_batch)
+                if not polled:
+                    continue
+                logs: List[Dict[str, Any]] = []
+                for tp, messages in polled.items():
+                    for msg in messages:
+                        value = _decode(msg.value)
+                        if value is None:
+                            logger.warning(f"Skipping non-JSON-object message at {tp.partition}:{msg.offset}")
+                            continue
+                        logs.append(value)
+                if logs:
+                    try:
+                        await self.on_batch(logs)
+                    except Exception as e:
+                        # Rewind so the same batch is retried; nothing is committed past it.
+                        logger.error(f"Error ingesting batch of {len(logs)} logs: {e}")
+                        for tp, messages in polled.items():
+                            self.consumer.seek(tp, messages[0].offset)
+                        await asyncio.sleep(5)
+                        continue
+                await self.consumer.commit()
         except ConsumerStoppedError:
             logger.info("Consumer stopped cleanly.")
         except asyncio.CancelledError:

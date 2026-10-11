@@ -134,8 +134,14 @@ class LogRedactor:
             model = self.config.get("nlp_model", f"en_core_web_{model_size}")
             self.analyzer, self.anonymizer = _EngineCache.get(profile, model, self.config)
             self.ner_available = True
-        except Exception as e:
+        except (Exception, SystemExit) as e:
             # Degrade to rules only — never degrade to no redaction.
+            # SystemExit is caught explicitly: presidio's SpacyNlpEngine.load()
+            # auto-downloads the spaCy model via spacy.cli.download(), which
+            # calls sys.exit(1) on a failed download (e.g. no network, no pip
+            # in the venv, or a blocked GitHub release URL). Without catching
+            # it here, that SystemExit would propagate past this handler and
+            # crash the caller instead of degrading to rule-only redaction.
             logger.error("Presidio unavailable (%s). Rule-only mode active. "
                          "Named-entity PII will NOT be caught.", e)
 

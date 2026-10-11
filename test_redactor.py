@@ -30,7 +30,11 @@ def test_redactor_pii_metadata():
     }
 
     clean = redactor.redact_log(payload)
-    assert clean.get("customer_id") == "[REDACTED]"
+    # Sensitive IDs are pseudonymized (stable keyed hash), not blanked, so logs
+    # can still be grouped by user without exposing the raw value.
+    assert clean.get("customer_id", "").startswith("anon_")
+    assert "8827361" not in clean["customer_id"]
+    assert clean["customer_id"] == redactor.redact_log(payload)["customer_id"]
     assert clean.get("contains_pii") is True
     assert "customer_id" in clean.get("pii_fields", [])
     assert "message" in clean.get("pii_fields", [])
