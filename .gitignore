@@ -8,6 +8,8 @@ data/chroma/
 data/delta-lake/
 data/spark-checkpoints/
 data/check/
+data/*.corrupt
+data/chroma.corrupt/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm

@@ -18,7 +18,7 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
   - [x] Passwords: **remove entirely**
   - [x] Emails: `user***@domain.com`
 - [ ] Classification metadata: tag all logs (public / internal / confidential / PII)
-- [x] Testing: 99%+ precision, <5% false negatives
+- [ ] Testing: precision and false-negative rate are not measured. The rule tier is reliable for emails, Luhn-valid card numbers and SSNs. NER over-triggers on syslog (for example `%BGP-5-ADJCHANGE`) and has not been evaluated on network logs. No labelled evaluation set exists yet.
 
 ### Data Retention & Deletion (GDPR & PCI-DSS)
 - [ ] **PII data**: 90 days (right to be forgotten)
@@ -310,7 +310,7 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
 ## Quick Checklist Summary (Priority Order)
 
 ### Critical (Week 1–4)
-- [x] PII detection & redaction (99%+ precision)
+- [x] PII detection & redaction (rules for emails, Luhn cards and SSNs; NER over-triggers on syslog; precision not measured on network logs)
 - [ ] Encryption in transit (TLS 1.3) & at rest (KMS)
 - [x] RBAC (admin, analyst, viewer)
 - [x] Audit logging (all queries, data access)
