@@ -10,6 +10,10 @@ A **FastAPI** backend orchestrates the **Gemini API** via **LangChain/LangGraph*
 
 Note: _This repo currently implements a lightweight, serverless FastAPI service with modular plugins (connectors/detectors/analyzers). Streaming ingestion is through the opt-in Kafka connector, or, for high volume, the opt-in Spark Structured Streaming job (see "Real-Time Ingestion" below). Managed/cluster deployments remain part of the **future scale-out plan**._
 
+## Purpose
+
+On-call engineers face thousands of near-identical log lines that often contain personal data. This prototype turns error bursts into single routed incidents, and redacts PII before storage. A slow NER model finds names, the system learns where they appear, and a reviewer approves the proposed rule once, so the high-volume Spark path catches them without NER. For the pitch and a step-by-step walkthrough, see [docs/DEMO.md](./docs/DEMO.md).
+
 ## Implemented Now (MVP)
 
 - **FastAPI API** with `GET /`, `POST /ingest`, `POST /analyze`, `GET /plugins`, `GET /incidents`, `GET /incidents/{id}`, `POST /incidents/{id}/feedback`, `GET /feedback`, `POST /events/deployments`, `GET /deployments`, `POST|GET /knowledge`, `DELETE /knowledge/{id}`, `POST /search`, `GET /summary`, `GET /audit-trail`, `GET /metrics`, `GET /admin/integrations`
