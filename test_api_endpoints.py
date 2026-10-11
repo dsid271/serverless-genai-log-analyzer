@@ -41,6 +41,36 @@ def test_api_ingest_search_summary_audit(monkeypatch):
         assert len(incidents) >= 1
         assert any(incident.get("details", {}).get("contains_pii") is True for incident in incidents)
 
+        # Change event, feedback loop and knowledge base.
+        inc = next(i for i in incidents if "test-service" in i["details"]["sources"])
+        assert inc["status"] == "open" and inc["severity"]["factors"] and inc["routing"]["team"]
+        from datetime import datetime, timedelta, timezone
+        deployed_at = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+        dep = client.post(
+            "/events/deployments",
+            json={"service": "test-service", "version": "v9.9.9", "deployed_at": deployed_at},
+        )
+        assert dep.status_code == 201, dep.text
+        assert inc["id"] in dep.json()["linked_incidents"]
+
+        bad = client.post(f"/incidents/{inc['id']}/feedback", json={"verdict": "maybe"})
+        assert bad.status_code == 422
+        fb = client.post(
+            f"/incidents/{inc['id']}/feedback",
+            json={"verdict": "resolved", "note": "Rolled back test-service v9.9.9; bad DB pool size."},
+        )
+        assert fb.status_code == 200, fb.text
+        assert fb.json()["incident"]["status"] == "resolved"
+        pm_id = fb.json()["feedback"]["postmortem_id"]
+
+        detail = client.get(f"/incidents/{inc['id']}").json()
+        assert detail["deployments"][0]["version"] == "v9.9.9"
+        assert detail["feedback"][0]["verdict"] == "resolved"
+        hits = client.get("/knowledge", params={"q": "test-service DB pool rollback"}).json()["documents"]
+        assert pm_id in {h["id"] for h in hits}
+        assert client.delete(f"/knowledge/{pm_id}").status_code == 200
+        assert client.get("/incidents/inc-missing").status_code == 404
+
         search_payload = {"query": "endpoint coverage", "limit": 1}
         search_response = client.post("/search", json=search_payload)
         assert search_response.status_code == 200, search_response.text
@@ -60,3 +90,158 @@ def test_api_ingest_search_summary_audit(monkeypatch):
             event.get("action") == "POST /ingest" and event.get("contains_pii") is True
             for event in events
         )
+
+
+        summary = summary_response.json()["hourly_summaries"]
+        bucket = next(b for b in summary if b["hour"] == "2026-08-01T12:00:00Z")
+        assert bucket["error_count"] >= 1
+
+
+def test_key_issuance_scopes_expiry_and_revocation(monkeypatch, tmp_path):
+    import time
+    from api.key_store import KeyStore, get_key_store
+
+    monkeypatch.setenv("API_KEYS_DB", str(tmp_path / "keys.sqlite3"))
+    monkeypatch.setenv("ENABLE_AUTH", "true")
+    admin_key, _ = get_key_store().issue("bootstrap-admin", "admin")
+
+    # No lifespan needed: auth does not depend on connectors/detectors.
+    client = TestClient(app)
+    assert client.get("/incidents").status_code == 401
+    assert client.get("/incidents", headers={"X-API-Key": "gla_nope_nope"}).status_code == 401
+
+    admin = {"X-API-Key": admin_key}
+    issued = client.post("/admin/keys", headers=admin, json={"name": "shipper", "profile": "ingest-service"})
+    assert issued.status_code == 201, issued.text
+    body = issued.json()
+    assert body["scopes"] == ["logs:ingest"]
+    ingest_only = {"X-API-Key": body["api_key"]}
+
+    # Scope enforcement: ingest-service can ingest but cannot read incidents.
+    assert client.get("/incidents", headers=ingest_only).status_code == 403
+    hook = client.post("/admin/keys", headers=admin, json={"name": "ci", "profile": "deploy-webhook"}).json()
+    hook_hdr = {"X-API-Key": hook["api_key"]}
+    assert client.post("/incidents/x/feedback", headers=hook_hdr, json={"note": "n"}).status_code == 403
+    assert client.post("/knowledge", headers=hook_hdr, json={}).status_code == 403
+    bad_profile = client.post("/admin/keys", headers=admin, json={"name": "x", "profile": "root"})
+    assert bad_profile.status_code == 400
+
+    listed = client.get("/admin/keys", headers=admin).json()["keys"]
+    assert {k["key_id"] for k in listed} >= {body["key_id"]}
+    assert all("api_key" not in k and "secret_hash" not in k for k in listed)
+
+    assert client.delete(f"/admin/keys/{body['key_id']}", headers=admin).status_code == 200
+    assert client.get("/plugins", headers=ingest_only).status_code == 401
+    assert client.delete(f"/admin/keys/{body['key_id']}", headers=admin).status_code == 404
+
+    store = KeyStore(str(tmp_path / "expiry.sqlite3"))
+    raw, rec = store.issue("short-lived", "viewer", ttl_days=1)
+    assert store.verify(raw) is not None
+    monkeypatch.setattr(time, "time", lambda: rec.expires_at + 1)
+    assert store.verify(raw) is None
+
+
+def test_ticket_dispatcher_open_update_resolve_and_retry(tmp_path):
+    from core.incident_store import IncidentStore
+    from core.ticketing import TicketDispatcher
+
+    class FakeSink:
+        name = "fake"
+
+        def __init__(self):
+            self.calls, self.fail = [], False
+
+        def _rec(self, action, inc):
+            if self.fail:
+                raise RuntimeError("provider down")
+            self.calls.append((action, inc["severity"]["level"]))
+
+        def open(self, inc):
+            self._rec("open", inc)
+            return "EXT-1"
+
+        def update(self, inc, external_id):
+            self._rec("update", inc)
+
+        def resolve(self, inc, external_id):
+            self._rec("resolve", inc)
+
+    store = IncidentStore(str(tmp_path / "inc.sqlite3"))
+    sink = FakeSink()
+    d = TicketDispatcher(store, [sink], min_level="high")
+    inc = {"id": "inc-1", "status": "open", "message": "m", "severity": {"level": "medium"}}
+
+    d.process(inc)  # below threshold
+    assert sink.calls == [] and store.tickets("inc-1") == {}
+
+    sink.fail = True
+    d.process({**inc, "severity": {"level": "high"}})
+    assert store.tickets("inc-1")["fake"]["status"] == "failed"
+    sink.fail = False
+    d.process({**inc, "severity": {"level": "high"}})  # retried
+    d.process({**inc, "severity": {"level": "high"}})  # unchanged: no call
+    d.process({**inc, "severity": {"level": "critical"}})
+    d.process({**inc, "status": "resolved", "severity": {"level": "critical"}})
+    d.process({**inc, "status": "resolved", "severity": {"level": "critical"}})
+    assert sink.calls == [("open", "high"), ("update", "critical"), ("resolve", "critical")]
+    t = store.tickets("inc-1")["fake"]
+    assert t["external_id"] == "EXT-1" and t["status"] == "resolved"
+
+
+def test_webhook_sink_signs_body(monkeypatch):
+    import hashlib
+    import hmac
+    import json
+    import core.ticketing as ticketing
+
+    sent = {}
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b""
+
+    def fake_urlopen(req, timeout):
+        sent["body"], sent["sig"] = req.data, req.get_header("X-signature-256")
+        return Resp()
+
+    monkeypatch.setenv("TICKET_WEBHOOK_URL", "http://hooks.invalid/x")
+    monkeypatch.setenv("TICKET_WEBHOOK_SECRET", "s3")
+    monkeypatch.setattr(ticketing.urllib.request, "urlopen", fake_urlopen)
+    assert ticketing.WebhookSink().open({"id": "inc-9", "message": "m"}) == "inc-9"
+    assert json.loads(sent["body"])["event"] == "opened"
+    assert sent["sig"] == "sha256=" + hmac.new(b"s3", sent["body"], hashlib.sha256).hexdigest()
+
+
+def test_ip_enrichment_adds_flat_fields_for_public_ips_only():
+    from processing.enricher import LogEnricher
+
+    class Redactor:
+        def redact_log(self, log):
+            return {**log, "source_ip": "<redacted>"}
+
+    class FakeIntel:
+        def __init__(self):
+            self.batches = []
+
+        def lookup_many(self, ips):
+            ips = sorted(set(ips))
+            self.batches.append(ips)
+            return {ip: {"country": "NL", "abuse_score": 90, "malicious": True} for ip in ips}
+
+        def lookup(self, ip):
+            raise AssertionError("batch path must not do per-log lookups")
+
+    intel = FakeIntel()
+    out = LogEnricher(redactor=Redactor(), ip_intel=intel).process_logs([
+        {"source_ip": "8.8.8.8"}, {"source_ip": "8.8.8.8"}, {"source_ip": "10.0.0.5"},
+    ])
+    assert intel.batches == [["8.8.8.8"]]
+    assert out[0]["source_ip_country"] == "NL" and out[0]["source_ip_malicious"] is True
+    assert out[0]["source_ip_scope"] == "public" and out[0]["source_ip"] == "<redacted>"
+    assert out[2]["source_ip_scope"] == "private" and "source_ip_country" not in out[2]

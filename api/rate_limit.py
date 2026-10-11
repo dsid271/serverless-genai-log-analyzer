@@ -11,21 +11,23 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from api.auth import User
+from api.key_store import parse_key
 
 def _get_identity(request: Request) -> str:
     """
     Identity function for rate limiting.
-    Uses the X-API-Key if available, otherwise falls back to the client IP address.
+    Uses the authenticated key id if available, otherwise the client IP address.
     """
-    # Assuming auth middleware places the User object or API key in request state if auth is enabled
-    if hasattr(request.state, "user") and isinstance(request.state.user, User):
-        return f"user:{request.state.user.name}"
-    
-    api_key = request.headers.get("X-API-Key")
-    if api_key:
-        # In a real app, hash this before using it as a key
-        return f"key:{api_key[:10]}"
-        
+    # get_current_user places the User on request.state
+    user = getattr(request.state, "user", None)
+    if isinstance(user, User):
+        return f"key:{user.key_id}" if user.key_id else f"user:{user.name}"
+
+    parsed = parse_key(request.headers.get("X-API-Key", ""))
+    if parsed:
+        # key_id only; the secret part never becomes a limiter key
+        return f"key:{parsed[0]}"
+
     return get_remote_address(request)
 
 
