@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from processing.learned_pii import LearnedEntities
+from processing.learned_pii import DEFAULT_PSEUDONYM_KEY, LearnedEntities
 from processing.pii_rules import PiiRuleStore
 
 logger = logging.getLogger(__name__)
@@ -140,7 +140,7 @@ class LogRedactor:
         self._ner_cache: "OrderedDict[str, Tuple[str, bool]]" = OrderedDict()
         self._ner_cache_lock = threading.Lock()
         self._key = pseudonym_key or os.environ.get(
-            "PII_PSEUDONYM_KEY", "dev-only-change-me").encode()
+            "PII_PSEUDONYM_KEY", DEFAULT_PSEUDONYM_KEY).encode()
 
         self.config = self._load_config(profile)
         self.entities = self.config.get("entities")
@@ -149,8 +149,13 @@ class LogRedactor:
         self.allow_list = self.config.get("allow_list", [])
         self.ip_allow = tuple(self.config.get("ip_allow_prefixes", []))
         # Without NER nothing new is learned; the store is only read.
+        # Raises if PII_LEARNING is on while the key is the public default.
         self.learned = LearnedEntities.from_env(self._key, self.allow_list, read_only=not use_ner)
         self.pii_rules = PiiRuleStore.from_env(self._key, read_only=not use_ner)
+        if self._key == DEFAULT_PSEUDONYM_KEY.encode():
+            logger.warning("PII_PSEUDONYM_KEY is the public default %r: pseudonyms and the hashes in the "
+                           "PII rule store are guessable. Set a secret key before using real data.",
+                           DEFAULT_PSEUDONYM_KEY)
         self.rules = RuleRedactor(self.learned, self.pii_rules)
         if not use_ner:
             logger.info("NER disabled by caller; rules-only mode (learned entities: %s, pii rules: %s).",

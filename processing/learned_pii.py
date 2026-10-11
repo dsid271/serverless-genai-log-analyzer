@@ -1,9 +1,13 @@
-"""Learned PII: entities found by NER become rules, so the rule tier improves over time.
+"""Learned PII: entities found by NER become rules once a person approves them.
 
-Only keyed hashes of the entity text are stored, never the text itself. An entity
-becomes active after PII_LEARN_MIN_HITS separate NER detections; the rule tier then
-masks it everywhere, including rules-only paths (Spark, or NER unavailable).
+Only keyed hashes of the entity text are stored, never the text itself. After
+PII_LEARN_MIN_HITS separate NER detections an entity becomes `pending`. Only `approved`
+entities are applied, through the same admin API as the template suggestions in
+processing/pii_rules.py (/admin/pii-rules?kind=entity, /admin/pii-rules/decisions), so
+nothing NER sees becomes a rule without human approval. Approved entities are masked
+everywhere, including rules-only paths (Spark, or NER unavailable).
 Terms on the profile's allow_list are never learned or applied.
+Off by default (PII_LEARNING=false); refuses to start with the public default key.
 """
 from __future__ import annotations
 
@@ -21,6 +25,9 @@ logger = logging.getLogger(__name__)
 MAX_WORDS = 4
 _WORD = re.compile(r"[^\W_][\w'-]*")
 _DEFAULT_ENTITIES = "PERSON,LOCATION,NRP"
+DEFAULT_PSEUDONYM_KEY = "dev-only-change-me"
+STATUSES = ("collecting", "pending", "approved", "rejected")
+DECISIONS = ("approved", "rejected", "pending")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -48,14 +55,26 @@ class LearnedEntities:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS learned_pii (hash TEXT PRIMARY KEY, entity TEXT NOT NULL,"
-                " words INTEGER NOT NULL, hits INTEGER NOT NULL, first_seen REAL, last_seen REAL)")
+                " words INTEGER NOT NULL, hits INTEGER NOT NULL, first_seen REAL, last_seen REAL,"
+                " status TEXT NOT NULL DEFAULT 'collecting', decided_at REAL, decided_by TEXT)")
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(learned_pii)")}
+            if "status" not in cols:
+                # Tables from before approval existed: those entities were active without review.
+                # They go to `pending`, not `approved`, so a person has to confirm them.
+                for col in ("status TEXT NOT NULL DEFAULT 'collecting'", "decided_at REAL", "decided_by TEXT"):
+                    self._conn.execute(f"ALTER TABLE learned_pii ADD COLUMN {col}")
+                self._conn.execute("UPDATE learned_pii SET status = 'pending' WHERE hits >= ?", (self.min_hits,))
             self._conn.commit()
 
     @classmethod
     def from_env(cls, key: bytes, allow_list: Iterable[str] = (),
                  read_only: bool = False) -> Optional["LearnedEntities"]:
-        if not _env_bool("PII_LEARNING", True):
+        if not _env_bool("PII_LEARNING", False):
             return None
+        if key == DEFAULT_PSEUDONYM_KEY.encode():
+            # Hashes of names under a public key can be reversed with a dictionary of names.
+            raise RuntimeError("PII_LEARNING is on but PII_PSEUDONYM_KEY is still the public default "
+                               f"{DEFAULT_PSEUDONYM_KEY!r}. Set a secret key or set PII_LEARNING=false.")
         try:
             return cls(
                 path=os.getenv("PII_LEARNED_DB", "./data/learned_pii.sqlite3"),
@@ -100,11 +119,13 @@ class LearnedEntities:
             try:
                 for h, entity, n in set(rows):
                     self._conn.execute(
-                        "INSERT INTO learned_pii VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(hash) DO UPDATE"
+                        "INSERT INTO learned_pii (hash, entity, words, hits, first_seen, last_seen)"
+                        " VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(hash) DO UPDATE"
                         " SET hits = hits + 1, last_seen = excluded.last_seen", (h, entity, n, now, now))
-                    hits = self._conn.execute("SELECT hits FROM learned_pii WHERE hash = ?", (h,)).fetchone()[0]
-                    if hits >= self.min_hits:
-                        self._active.setdefault(n, set()).add(h)
+                    # Enough sightings only makes it reviewable; it is not applied until approved.
+                    self._conn.execute(
+                        "UPDATE learned_pii SET status = 'pending' WHERE hash = ? AND status = 'collecting'"
+                        " AND hits >= ?", (h, self.min_hits))
                 self._conn.commit()
             except sqlite3.Error as e:
                 logger.error("Could not record learned PII: %s", e)
@@ -116,18 +137,22 @@ class LearnedEntities:
         if now - self._loaded_at < self.reload_seconds:
             return
         self._loaded_at = now
+        query = "SELECT hash, words FROM learned_pii WHERE status = 'approved'"
         try:
             if self._conn is not None:
-                rows = self._conn.execute(
-                    "SELECT hash, words FROM learned_pii WHERE hits >= ?", (self.min_hits,)).fetchall()
+                rows = self._conn.execute(query).fetchall()
             elif os.path.exists(self.path):
-                with sqlite3.connect(f"file:{os.path.abspath(self.path)}?mode=ro", uri=True) as ro:
-                    rows = ro.execute(
-                        "SELECT hash, words FROM learned_pii WHERE hits >= ?", (self.min_hits,)).fetchall()
+                ro = sqlite3.connect(f"file:{os.path.abspath(self.path)}?mode=ro", uri=True)
+                try:
+                    rows = ro.execute(query).fetchall()
+                finally:
+                    ro.close()
             else:
                 return
         except sqlite3.Error as e:
-            logger.warning("Could not load learned PII: %s", e)
+            # An unmigrated table (no status column yet) has nothing approved.
+            if "no such" not in str(e):
+                logger.warning("Could not load learned PII: %s", e)
             return
         active: Dict[int, Set[str]] = {}
         for h, n in rows:
@@ -136,9 +161,55 @@ class LearnedEntities:
         self._active = active
 
     def size(self) -> int:
+        """Number of approved entities in use."""
         with self._lock:
             self._maybe_reload()
             return sum(len(s) for s in self._active.values())
+
+    # --- review (API) -------------------------------------------------------
+
+    def _rows(self, where: str, params: tuple) -> List[Dict[str, Any]]:
+        cols = ("hash", "entity", "words", "status", "hits", "first_seen", "last_seen", "decided_at", "decided_by")
+        out = []
+        for r in self._conn.execute(f"SELECT {', '.join(cols)} FROM learned_pii {where}", params).fetchall():
+            row = dict(zip(cols, r))
+            row["id"] = row.pop("hash")
+            row["kind"] = "entity"
+            # The text is never stored, so a reviewer sees the type and size, not the value.
+            row["display"] = f"{{{row['entity']}}}, {row['words']} word(s), value not stored"
+            out.append(row)
+        return out
+
+    def list(self, status: Optional[str] = "pending", limit: int = 100) -> List[Dict[str, Any]]:
+        if self._conn is None:
+            raise RuntimeError("Learned entity store is read-only")
+        where, params = ("WHERE status = ?", (status,)) if status else ("", ())
+        with self._lock:
+            return self._rows(f"{where} ORDER BY hits DESC LIMIT ?", params + (max(1, min(limit, 1000)),))
+
+    def decide(self, ids: Iterable[str], status: str, by: str) -> List[Dict[str, Any]]:
+        """Approve, reject or reset entities; returns the updated rows."""
+        if self._conn is None:
+            raise RuntimeError("Learned entity store is read-only")
+        if status not in DECISIONS:
+            raise ValueError(f"status must be one of {list(DECISIONS)}")
+        ids = sorted(set(ids))
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        with self._lock:
+            self._conn.execute(f"UPDATE learned_pii SET status = ?, decided_at = ?, decided_by = ?"
+                               f" WHERE hash IN ({marks})", (status, time.time(), by, *ids))
+            self._conn.commit()
+            self._loaded_at = float("-inf")
+            return self._rows(f"WHERE hash IN ({marks})", tuple(ids))
+
+    def counts(self) -> Dict[str, int]:
+        if self._conn is None:
+            raise RuntimeError("Learned entity store is read-only")
+        with self._lock:
+            rows = self._conn.execute("SELECT status, COUNT(*) FROM learned_pii GROUP BY status").fetchall()
+        return {s: 0 for s in STATUSES} | dict(rows)
 
     def apply(self, text: str) -> Tuple[str, bool]:
         with self._lock:

@@ -183,6 +183,22 @@ def test_pii_rule_review_endpoints(monkeypatch, tmp_path):
     assert bad.status_code == 422
     assert store.apply("Refund denied for Zed Quux") == ("Refund denied for [REDACTED]", True)
 
+    # Learned entities use the same review endpoints; off unless PII_LEARNING is on.
+    monkeypatch.setattr(orchestrator.enricher.redactor, "learned", None)
+    assert client.get("/admin/pii-rules?kind=entity", headers=admin).status_code == 503
+    from processing.learned_pii import LearnedEntities
+    learned = LearnedEntities(str(tmp_path / "learned.sqlite3"), b"k", entities=["PERSON"], min_hits=1,
+                              reload_seconds=0)
+    hit = SimpleNamespace(entity_type="PERSON", start=0, end=14)
+    learned.observe("Maria Gonzalez", [hit])
+    monkeypatch.setattr(orchestrator.enricher.redactor, "learned", learned)
+    [entity] = client.get("/admin/pii-rules?kind=entity", headers=admin).json()["rules"]
+    assert entity["kind"] == "entity" and "maria" not in entity["display"].lower()
+    assert learned.apply("Maria Gonzalez")[1] is False
+    done = client.post("/admin/pii-rules/decisions", headers=admin, json={"ids": [entity["id"]], "status": "approved"})
+    assert done.json()["updated"][0]["status"] == "approved" and done.json()["not_found"] == []
+    assert learned.apply("Maria Gonzalez") == ("[REDACTED]", True)
+
     assert "text/html" in client.get("/ui/pii-rules").headers["content-type"]
     metrics = client.get("/metrics").text
     if "disabled" not in metrics:

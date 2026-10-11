@@ -85,16 +85,24 @@ def _hit(text, span, entity="PERSON"):
     return SimpleNamespace(entity_type=entity, start=start, end=start + len(span))
 
 
-def test_learned_entities_become_rules_after_min_hits_without_storing_raw_text(tmp_path):
+def test_learned_entities_apply_only_after_approval_without_storing_raw_text(tmp_path):
     db = str(tmp_path / "learned.sqlite3")
     learned = LearnedEntities(db, b"k", entities=["PERSON"], min_hits=2,
                               reload_seconds=0, allow_list=["Cisco"])
     t1 = "refund for Maria Gonzalez approved"
     learned.observe(t1, [_hit(t1, "Maria Gonzalez"), _hit(t1, "approved", "DATE_TIME")])
     assert learned.apply("call Maria Gonzalez") == ("call Maria Gonzalez", False)
+    assert learned.list("pending") == []
 
     t2 = "Maria Gonzalez called again"
     learned.observe(t2, [_hit(t2, "Maria Gonzalez")])
+    # Enough hits only makes it reviewable; it is not applied until a person approves it.
+    assert learned.apply("ticket for MARIA gonzalez, card ok")[1] is False
+    [row] = learned.list("pending")
+    assert row["entity"] == "PERSON" and row["words"] == 2 and row["hits"] == 2
+    assert "maria" not in row["display"].lower()
+
+    assert learned.decide([row["id"]], "approved", by="tester")[0]["decided_by"] == "tester"
     assert learned.apply("ticket for MARIA gonzalez, card ok") == ("ticket for [REDACTED], card ok", True)
     assert learned.apply("Maria alone is not a match") == ("Maria alone is not a match", False)
 
@@ -108,7 +116,8 @@ def test_learned_entities_become_rules_after_min_hits_without_storing_raw_text(t
     assert LearnedEntities(db, b"other-key", min_hits=2, read_only=True).apply("Maria Gonzalez")[1] is False
 
 
-def test_rules_only_redactor_applies_learned_entities(monkeypatch, tmp_path):
+def test_rules_only_redactor_applies_approved_learned_entities(monkeypatch, tmp_path):
+    monkeypatch.setenv("PII_LEARNING", "true")
     monkeypatch.setenv("PII_LEARNED_RELOAD_SECONDS", "0")
     monkeypatch.setenv("PII_PSEUDONYM_KEY", "test-key")
     teacher = LearnedEntities.from_env(b"test-key")
@@ -118,9 +127,39 @@ def test_rules_only_redactor_applies_learned_entities(monkeypatch, tmp_path):
 
     redactor = LogRedactor(profile="financial", use_ner=False)
     assert not redactor.ner_available
+    assert redactor.redact_log({"message": "chargeback by Maria Gonzalez"})["message"] == "chargeback by Maria Gonzalez"
+
+    teacher.decide([teacher.list("pending")[0]["id"]], "approved", by="tester")
     clean = redactor.redact_log({"message": "chargeback by Maria Gonzalez"})
     assert clean["message"] == "chargeback by [REDACTED]"
     assert clean["contains_pii"] is True and clean["redaction_mode"] == "rules-only"
+
+
+def test_learning_is_off_by_default_and_refuses_the_public_key(monkeypatch):
+    monkeypatch.delenv("PII_LEARNING", raising=False)
+    assert LearnedEntities.from_env(b"test-key") is None
+
+    monkeypatch.setenv("PII_LEARNING", "true")
+    with pytest.raises(RuntimeError, match="PII_PSEUDONYM_KEY"):
+        LearnedEntities.from_env(b"dev-only-change-me")
+    monkeypatch.delenv("PII_PSEUDONYM_KEY", raising=False)
+    with pytest.raises(RuntimeError):
+        LogRedactor(profile="financial", use_ner=False)
+
+
+def test_pre_approval_learned_table_is_migrated_to_pending(tmp_path):
+    import sqlite3
+    db = str(tmp_path / "old.sqlite3")
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE learned_pii (hash TEXT PRIMARY KEY, entity TEXT NOT NULL,"
+                " words INTEGER NOT NULL, hits INTEGER NOT NULL, first_seen REAL, last_seen REAL)")
+    con.execute("INSERT INTO learned_pii VALUES ('h1', 'PERSON', 2, 5, 0, 0), ('h2', 'PERSON', 1, 1, 0, 0)")
+    con.commit()
+    con.close()
+    learned = LearnedEntities(db, b"k", min_hits=2, reload_seconds=0)
+    assert [r["id"] for r in learned.list("pending")] == ["h1"]   # was active, now needs review
+    assert [r["id"] for r in learned.list("collecting")] == ["h2"]
+    assert learned.size() == 0
 
 
 _NAMES = ["Maria Gonzalez", "John Smith", "Ana Li", "Bob Stone", "Ana Li"]

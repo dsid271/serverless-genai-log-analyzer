@@ -608,6 +608,13 @@ def _require_pii_rule_store():
     return store
 
 
+def _learned_store():
+    """Writable learned-entity store of the API's redactor, or None when PII_LEARNING is off."""
+    redactor = getattr(orchestrator.enricher, "redactor", None)
+    store = getattr(redactor, "learned", None)
+    return store if store is not None and not store.read_only else None
+
+
 class PiiRuleDecision(BaseModel):
     ids: List[str] = Field(min_length=1, max_length=500)
     status: Literal["approved", "rejected", "pending"]
@@ -619,11 +626,20 @@ async def list_pii_rules(
     request: Request,
     status: Optional[str] = "pending",
     limit: int = 100,
+    kind: Literal["template", "entity"] = "template",
     user: User = Depends(require_scope("pii:admin")),
 ):
-    """Suggested PII rules. `status`: collecting, pending, approved, rejected, or all."""
+    """Suggested PII rules. `status`: collecting, pending, approved, rejected, or all.
+
+    `kind=template` (default) lists message-shape suggestions; `kind=entity` lists learned
+    entities (only when PII_LEARNING is on). Both are decided at /admin/pii-rules/decisions."""
     from processing.pii_rules import STATUSES as RULE_STATUSES
-    store = _require_pii_rule_store()
+    if kind == "entity":
+        store = _learned_store()
+        if store is None:
+            raise HTTPException(status_code=503, detail="Learned entities are disabled (PII_LEARNING).")
+    else:
+        store = _require_pii_rule_store()
     if status == "all":
         status = None
     elif status not in RULE_STATUSES:
@@ -634,9 +650,14 @@ async def list_pii_rules(
 @app.post("/admin/pii-rules/decisions", tags=["Admin"])
 @limiter.limit(rate_limit_default)
 async def decide_pii_rules(request: Request, body: PiiRuleDecision, user: User = Depends(require_scope("pii:admin"))):
-    """Approve, reject or reset (`pending`) suggestions. Approved rules apply in the rule tier (API and Spark)."""
-    store = _require_pii_rule_store()
-    rules = store.decide(body.ids, body.status, by=request.state.user_identity)
+    """Approve, reject or reset (`pending`) suggestions and learned entities by id.
+    Approved rules apply in the rule tier (API and Spark)."""
+    stores = [s for s in (_pii_rule_store(), _learned_store()) if s is not None]
+    if not stores:
+        raise HTTPException(status_code=503, detail="PII rule suggestions are disabled (PII_RULE_SUGGESTIONS).")
+    rules: List[Dict[str, Any]] = []
+    for store in stores:
+        rules += store.decide(body.ids, body.status, by=request.state.user_identity)
     found = {r["id"] for r in rules}
     return {"updated": rules, "not_found": sorted(set(body.ids) - found)}
 
