@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 
 from core.event_bus import EventBus
 from core.plugin_registry import PluginRegistry
+from core.triage import TriageService
 
 
 class AnalyzerRunner:
@@ -12,12 +13,12 @@ class AnalyzerRunner:
         self,
         incident_bus: EventBus,
         registry: PluginRegistry,
-        incident_store: Any,
+        triage: TriageService,
         enabled_analyzers: list[str],
     ) -> None:
         self._bus = incident_bus
         self._registry = registry
-        self._store = incident_store
+        self._triage = triage
         self._enabled = enabled_analyzers
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -37,8 +38,10 @@ class AnalyzerRunner:
         q = self._bus.queue()
         print(f"RUNNER STARTED, enabled={self._enabled}", flush=True)
         while self._running:
+            # Errors from q.get() itself (e.g. queue bound to another event loop)
+            # are not retryable; let them end the task instead of spinning.
+            event: Dict[str, Any] = await q.get()
             try:
-                event: Dict[str, Any] = await q.get()
                 incident = event.get("incident")
                 incident_id = event.get("incident_id")
                 print(f"RUNNER: got {incident_id}", flush=True)
@@ -53,9 +56,7 @@ class AnalyzerRunner:
                     try:
                         analyzer = spec.factory()
                         res = await analyzer.analyze({"incident": incident})
-                        attach = getattr(self._store, "attach_analysis", None)
-                        if callable(attach):
-                            attach(incident_id, res)
+                        await asyncio.to_thread(self._triage.attach_analysis, incident_id, res)
                         print(f"RUNNER: attached {name}", flush=True)
                     except Exception as e:
                         print(f"ANALYZER FAILED [{name}]: {type(e).__name__}: {e}", flush=True)

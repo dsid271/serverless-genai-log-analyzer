@@ -26,7 +26,7 @@ class LogAnalysisEngine:
     def __init__(self, gemini_api_key: str, vector_store: VectorStore):
         self.vector_store = vector_store
         self.model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-        self.api_key = os.getenv("GEMINI_API_KEY")
+        self.api_key = gemini_api_key
         self._llm = ChatGoogleGenerativeAI(
             model=self.model,
             google_api_key=self.api_key,
@@ -72,23 +72,26 @@ class LogAnalysisEngine:
         """Evaluates if documents are pertinent to the query."""
         # Multi-agent logic: Use LLM to score relevance
         prompt = f"Query: {state['query']}\nDocuments: {state['documents']}\nAre these relevant? (yes/no)"
-        response = self.llm.invoke(prompt)
+        response = self._llm.invoke(prompt)
         is_relevant = "yes" in response.content.lower()
         return {"is_relevant": is_relevant}
 
     def generate_node(self, state: AgentState):
         """Constructs the final technical response."""
         prompt = f"Context (Logs): {state['documents']}\nUser Question: {state['query']}\nProvide a technical analysis."
-        response = self.llm.invoke(prompt)
+        response = self._llm.invoke(prompt)
         return {"generation": response.content}
 
     def transform_query_node(self, state: AgentState):
         """Rewrites the query if retrieval fails."""
-        # Simple placeholder for query optimization
-        return {
-        "query": f"{state['query']} (network logs, errors, root cause)",
-        "attempts": state.get("attempts", 0) + 1,
-    }
+        prompt = (
+            "Rewrite this log-search query so a semantic search over application log "
+            "messages is more likely to find relevant entries. Return only the rewritten query.\n"
+            f"Query: {state['query']}"
+        )
+        response = self._llm.invoke(prompt)
+        rewritten = str(response.content).strip() or state["query"]
+        return {"query": rewritten, "attempts": state.get("attempts", 0) + 1}
 
     # --- Conditional Edge logic ---
     def decide_to_generate(self, state: AgentState):

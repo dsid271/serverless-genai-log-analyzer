@@ -1,0 +1,32 @@
+# Service ownership map used to route incidents (see core/routing.py).
+# Replace teams, patterns and contacts with your own. Patterns use fnmatch
+# syntax and are matched against each log's `source` field.
+# tier: 1 = most business-critical; raises incident severity.
+default_team: platform-oncall
+
+teams:
+  payments:
+    services: ["payments-*", "checkout-*"]
+    tier: 1
+    oncall: payments-oncall@example.com
+    channel: "#payments-incidents"
+  identity:
+    services: ["auth-*"]
+    tier: 1
+    oncall: identity-oncall@example.com
+    channel: "#identity-incidents"
+  data-platform:
+    services: ["inventory-*", "*-db"]
+    tier: 2
+    oncall: data-oncall@example.com
+    channel: "#data-incidents"
+  security:
+    services: ["edge-firewall", "waf-*"]
+    tier: 2
+    oncall: secops@example.com
+    channel: "#secops"
+  messaging:
+    services: ["notif-*"]
+    tier: 3
+    oncall: messaging-oncall@example.com
+    channel: "#messaging"
