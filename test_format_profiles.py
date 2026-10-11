@@ -92,3 +92,30 @@ def test_ingest_route_applies_profile_and_rejects_unknown(monkeypatch):
         bad = client.post("/ingest", json={"format": "does_not_exist", "logs": [{"message": "x"}]})
         assert bad.status_code == 400
         assert "acme_insight" in bad.json()["detail"]
+
+
+def test_spark_record_processor_normalizes_redacts_and_patterns(monkeypatch, tmp_path):
+    import json
+
+    monkeypatch.setenv("PII_LEARNED_DB", str(tmp_path / "learned.sqlite3"))
+    from spark.transform import COLUMNS, RecordProcessor
+
+    proc = RecordProcessor(format_profile="acme_insight")
+    raw = json.dumps({"_time": 1700000000, "log_level": "ERR", "svc": "billing",
+                      "msg": "card 4111 1111 1111 1111 declined after 350ms"}).encode()
+    row = proc.process(raw, kafka_ts="ts")
+    assert set(row) == set(COLUMNS)
+    assert row["source"] == "billing" and row["severity"] == "ERROR" and row["is_error"] is True
+    assert row["timestamp"].startswith("2023-11-14")
+    assert "4111 1111 1111 1111" not in row["message"] and "4111" not in row["record"]
+    assert row["contains_pii"] is True and row["redaction_mode"] == "rules-only"
+    assert row["kafka_ts"] == "ts"
+
+    again = proc.process(json.dumps({"_time": 1700000001, "log_level": "ERR", "svc": "billing",
+                                     "msg": "card 4111 1111 1111 1111 declined after 12ms"}))
+    assert again["pattern_id"] == row["pattern_id"] and "<n>ms" in again["pattern"]
+
+    assert proc.process(b"not json") is None
+    assert proc.process(b"[1, 2]") is None
+    with pytest.raises(ValueError):
+        RecordProcessor(format_profile="does_not_exist")

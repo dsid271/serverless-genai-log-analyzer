@@ -8,7 +8,7 @@ A **FastAPI** backend orchestrates the **Gemini API** via **LangChain/LangGraph*
 
 **Continuous Integration** runs on **GitHub Actions**: on every push to `main` it runs `ruff`, a `py_compile` import check on `api/main.py`, and the pytest suite (see [Testing](#testing)), then builds and publishes a Docker image to the GitHub Container Registry (GHCR). There is no Continuous Deployment.
 
-Note: _This repo currently implements a lightweight, serverless FastAPI service with modular plugins (connectors/detectors/analyzers). Streaming ingestion is through the opt-in Kafka connector (see "Real-Time Ingestion" below); Spark/Flink deployments remain part of the **future scale-out plan** and are not implemented in this codebase._
+Note: _This repo currently implements a lightweight, serverless FastAPI service with modular plugins (connectors/detectors/analyzers). Streaming ingestion is through the opt-in Kafka connector, or, for high volume, the opt-in Spark Structured Streaming job (see "Real-Time Ingestion" below). Managed/cluster deployments remain part of the **future scale-out plan**._
 
 ## Implemented Now (MVP)
 
@@ -92,7 +92,7 @@ graph TB
 ## Key Features
 
 - **Modular DI**: All core components (redactor, storage, vector store, engine) are injected via constructor. There are no null fallbacks.
-- **Scale-out path (plan only)**: Kafka + Spark/Flink for high volume is described in `ARCHITECTURE.md`; it is not implemented or load-tested.
+- **Scale-out path**: a Spark Structured Streaming job (`spark/`, local mode in Docker) handles Kafka → Delta Lake and windowed spike detection. It has been run end-to-end locally but not load-tested; cluster deployment is described in `ARCHITECTURE.md` as a plan.
 - **Security controls**: PII masking, scoped API keys (off by default, see [API Keys](#api-keys)), and structured audit logging.
 - **Append-mode storage and audit trail**: logs are written to Delta Lake in append mode, and API calls are recorded in an audit trail.
 - **Audit-aware PII tracing**: ingestion and audit events persist `contains_pii` so the API can expose redaction status directly.
@@ -185,7 +185,7 @@ The image installs `requirements/full.txt`. There is no reduced image, because t
 
 Modules are activated at runtime via env vars:
 
-- **`ENABLED_CONNECTORS`**: `kafka`
+- **`ENABLED_CONNECTORS`**: `kafka`, `spark_candidates`
 - **`ENABLED_DETECTORS`**: `error_spike`
 - **`ENABLED_ANALYZERS`**: `simple_summary`, `gemini_triage`
 
@@ -393,7 +393,23 @@ docker compose --profile kafka up -d kafka api
 curl.exe -s http://localhost:8000/incidents -H "X-API-Key: $admin"
 ```
 
-Spark Structured Streaming was removed. It processed the same records as this connector through the same pipeline, but it needed Java and Hadoop binaries. It never ran successfully on Windows and has no stateful logic of its own.
+### High volume: Spark Structured Streaming (opt-in)
+
+For sustained high volume (thousands of events per second), `spark/streaming_job.py` replaces the `kafka` connector as the consumer of `logs-raw`. It reuses the same bricks: format profiles, rule-tier redaction including learned entities (NER is off in Spark), and message patterns.
+
+1. **`logs` query**: Kafka → normalize → redact → `pattern_id` → Delta Lake at `SPARK_DELTA_PATH`, partitioned by `date` and `source`.
+2. **`spikes` query**: streams the Delta table, counts errors per source in event-time windows (`SPARK_SPIKE_WINDOW`, late data allowed up to `SPARK_WATERMARK`), and publishes windows with at least `SPARK_SPIKE_THRESHOLD` errors (default: `ERROR_SPIKE_THRESHOLD`) to `SPARK_CANDIDATES_TOPIC` (`incident-candidates`).
+3. **API**: the `spark_candidates` connector consumes that topic and raises `error_spike` incidents through the normal triage, routing, analyzer and ticketing path, once per source and window.
+
+```powershell
+# .env: ENABLED_CONNECTORS=spark_candidates   (not "kafka": Spark is now the logs-raw consumer)
+docker compose --profile kafka --profile spark up -d kafka spark api
+```
+
+- **Runtime**: one container (`Dockerfile.spark`, Java 21, `local[*]`). The Kafka and Delta jars download on first start and are cached in the `spark-ivy` volume. The Spark UI is on http://localhost:4040.
+- **Shared state**: the container mounts `./data` and reads `.env`. `PII_PSEUDONYM_KEY` must match the api so learned entities apply.
+- **Delta tables**: Spark writes `data/delta-lake/logs_stream`, separate from the api's `data/delta-lake/logs`.
+- **Other settings**: `SPARK_TRIGGER` (`10 seconds`), `SPARK_MAX_OFFSETS_PER_TRIGGER` (200000), `SPARK_STARTING_OFFSETS` (`latest`), `SPARK_FORMAT_PROFILE`, `SPARK_CHECKPOINT_DIR`, `SPARK_SPIKE_OUTPUT_MODE` (`update` = alert as soon as a window crosses the threshold; `append` = once, after the watermark passes).
 
 ---
 

@@ -63,3 +63,31 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_NUM_PARTITIONS: 3
+
+  # Spark Structured Streaming job (spark/streaming_job.py). Opt-in:
+  # `docker compose --profile kafka --profile spark up -d`.
+  # Shares .env (PII_PSEUDONYM_KEY must match the api for learned entities) and ./data
+  # (Delta output, checkpoints, learned_pii.sqlite3) with the api.
+  spark:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    profiles: ["spark"]
+    env_file:
+      - .env
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - SPARK_DELTA_PATH=/app/data/delta-lake/logs_stream
+      - SPARK_CHECKPOINT_DIR=/app/data/spark-checkpoints
+      - PII_LEARNED_DB=/app/data/learned_pii.sqlite3
+      - SPARK_IVY_DIR=/opt/ivy
+    volumes:
+      - ./data:/app/data
+      - spark-ivy:/opt/ivy
+    ports:
+      - "4040:4040"
+    depends_on:
+      - kafka
+
+volumes:
+  spark-ivy:

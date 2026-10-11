@@ -141,6 +141,17 @@ plugin_registry.register(
 
 plugin_registry.register(
     PluginSpec(
+        name="spark_candidates",
+        kind="connector",
+        factory=lambda: __import__("core.connectors.candidates_connector", fromlist=["build_candidates_connector"]).build_candidates_connector(
+            triage,
+            incident_bus,
+        ),
+    )
+)
+
+plugin_registry.register(
+    PluginSpec(
         name="error_spike",
         kind="detector",
         factory=lambda: __import__("core.detectors.error_spike", fromlist=["ErrorSpikeDetector"]).ErrorSpikeDetector(

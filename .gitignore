@@ -6,4 +6,5 @@ __pycache__/
 
 data/chroma/
 data/delta-lake/
+data/spark-checkpoints/
 *.sqlite3

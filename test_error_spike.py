@@ -161,3 +161,26 @@ def test_feedback_override_reroute_and_false_positive_damping(monkeypatch, tmp_p
         t.apply_feedback(nxt.id, "alice", reassign_team="no-such-team")
     with pytest.raises(KeyError):
         t.apply_feedback("inc-missing", "alice", verdict="resolved")
+
+
+def test_spark_candidates_raise_one_incident_per_window(monkeypatch, tmp_path):
+    from core.connectors.candidates_connector import CandidateHandler
+
+    triage = _triage(tmp_path, "0", monkeypatch)
+    incident_bus = EventBus()
+    handler = CandidateHandler(triage, incident_bus)
+    cand = {"source": "payments-api", "window_start": "2026-10-11T10:00:00Z", "window_end": "2026-10-11T10:01:00Z",
+            "count": 25, "critical_count": 2, "contains_pii": True, "patterns": 3, "sample": "boom", "threshold": 20}
+
+    async def scenario():
+        await handler([cand, {**cand, "count": 40}])           # same window re-sent in update mode
+        await handler([{**cand, "window_start": "2026-10-11T10:01:00Z", "source": "orders-db"}])
+
+    asyncio.run(scenario())
+    items = triage.store.list(limit=10)
+    assert len(items) == 2
+    assert incident_bus.queue().qsize() == 2
+    first = next(i for i in items if i["details"]["sources"] == ["payments-api"])
+    assert first["kind"] == "error_spike" and first["details"]["origin"] == "spark"
+    assert first["details"]["count"] == 25 and first["details"]["contains_pii"] is True
+    assert first["routing"]["team"] == "payments"

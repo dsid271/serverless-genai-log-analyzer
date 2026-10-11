@@ -11,9 +11,10 @@ logger = logging.getLogger(__name__)
 
 
 class KafkaConnector:
-    def __init__(self, on_batch_callback, *, topic: Optional[str] = None):
+    def __init__(self, on_batch_callback, *, topic: Optional[str] = None, group_id: Optional[str] = None):
         self._on_batch_callback = on_batch_callback
         self._topic = topic
+        self._group_id = group_id
         self._consumer: Optional[LogConsumer] = None
         self._task: Optional[asyncio.Task] = None
         self._stopping = False
@@ -21,7 +22,7 @@ class KafkaConnector:
     async def start(self) -> None:
         bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
         topic = self._topic or os.getenv("LOG_TOPIC", "logs-raw")
-        group_id = os.getenv("KAFKA_GROUP_ID", "log-analyzer-group")
+        group_id = self._group_id or os.getenv("KAFKA_GROUP_ID", "log-analyzer-group")
 
         self._consumer = LogConsumer(
             self._on_batch_callback,
