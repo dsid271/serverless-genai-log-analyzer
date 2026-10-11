@@ -53,7 +53,7 @@ graph TB
     VectorDB[" Vector Database<br/>(Chroma local)<br/>Embeddings & Semantic Search"]
     GenAI[" GenAI Analysis Engine<br/>(LangGraph + Gemini)"]
     API[" API & Query Interface<br/>(FastAPI)"]
-    
+
     IpIntel["GeoLite2 / AbuseIPDB<br/>(optional)"]
     Tickets["PagerDuty / ServiceNow / webhook<br/>(optional)"]
     Detector["error_spike detector<br/>(static threshold)"]
@@ -373,6 +373,7 @@ The opt-in Kafka connector (`core/connectors/kafka_connector.py`) reads JSON log
 
 - **`VECTOR_INDEX_MODE`** (default `pattern`): Chroma embedding costs about 0.3 s per log on CPU. In `pattern` mode only the first log of each message pattern is embedded (ids, IPs and numbers are masked to find the pattern, per source and severity), and again after `VECTOR_PATTERN_TTL_SECONDS`. Semantic search then returns one example per pattern, not every repeat. Set `all` to embed every log. Delta Lake stores every log in both modes.
 - **`NER_CACHE_SIZE`** (default `4096`): Presidio results are cached by exact text, so repeated messages skip the NER pass with no loss of coverage. `0` disables it.
+- **`PII_LEARNING`** (default `true`): names and places that NER detects (`PII_LEARN_ENTITIES`) are added to the rule tier once seen `PII_LEARN_MIN_HITS` times. Rules-only paths (NER unavailable, or `use_ner=False`) then mask them too. Only keyed hashes (`PII_PSEUDONYM_KEY`) are stored in `PII_LEARNED_DB`, never the text. Terms on the profile's `allow_list` are never learned. Readers pick up new entries every `PII_LEARNED_RELOAD_SECONDS`.
 
 ### Log-format profiles
 

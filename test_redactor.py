@@ -1,5 +1,16 @@
 import json
+from types import SimpleNamespace
+
+import pytest
+
+from processing.learned_pii import LearnedEntities
 from processing.redactor import LogRedactor
+
+
+@pytest.fixture(autouse=True)
+def _isolated_learned_db(monkeypatch, tmp_path):
+    monkeypatch.setenv("PII_LEARNED_DB", str(tmp_path / "learned.sqlite3"))
+
 
 def test_production_redaction(profile="financial"):
     print(f"\n--- TESTING WITH PROFILE: {profile} ---")
@@ -66,6 +77,49 @@ def test_ner_cache_can_be_disabled(monkeypatch):
     redactor = LogRedactor(profile="financial")
     redactor._ner_cache_put("x", "y", True)
     assert redactor._ner_cache_get("x") is None
+
+
+def _hit(text, span, entity="PERSON"):
+    start = text.index(span)
+    return SimpleNamespace(entity_type=entity, start=start, end=start + len(span))
+
+
+def test_learned_entities_become_rules_after_min_hits_without_storing_raw_text(tmp_path):
+    db = str(tmp_path / "learned.sqlite3")
+    learned = LearnedEntities(db, b"k", entities=["PERSON"], min_hits=2,
+                              reload_seconds=0, allow_list=["Cisco"])
+    t1 = "refund for Maria Gonzalez approved"
+    learned.observe(t1, [_hit(t1, "Maria Gonzalez"), _hit(t1, "approved", "DATE_TIME")])
+    assert learned.apply("call Maria Gonzalez") == ("call Maria Gonzalez", False)
+
+    t2 = "Maria Gonzalez called again"
+    learned.observe(t2, [_hit(t2, "Maria Gonzalez")])
+    assert learned.apply("ticket for MARIA gonzalez, card ok") == ("ticket for [REDACTED], card ok", True)
+    assert learned.apply("Maria alone is not a match") == ("Maria alone is not a match", False)
+
+    learned.observe("Cisco Cisco", [_hit("Cisco Cisco", "Cisco")] * 2)   # allow-listed: never learned
+    assert learned.size() == 1
+    raw = open(db, "rb").read()
+    assert b"maria" not in raw.lower() and b"gonzalez" not in raw.lower()
+
+    reader = LearnedEntities(db, b"k", min_hits=2, reload_seconds=0, read_only=True)
+    assert reader.apply("from Maria Gonzalez")[0] == "from [REDACTED]"
+    assert LearnedEntities(db, b"other-key", min_hits=2, read_only=True).apply("Maria Gonzalez")[1] is False
+
+
+def test_rules_only_redactor_applies_learned_entities(monkeypatch, tmp_path):
+    monkeypatch.setenv("PII_LEARNED_RELOAD_SECONDS", "0")
+    monkeypatch.setenv("PII_PSEUDONYM_KEY", "test-key")
+    teacher = LearnedEntities.from_env(b"test-key")
+    text = "Maria Gonzalez"
+    teacher.observe(text, [_hit(text, text)])
+    teacher.observe(text, [_hit(text, text)])
+
+    redactor = LogRedactor(profile="financial", use_ner=False)
+    assert not redactor.ner_available
+    clean = redactor.redact_log({"message": "chargeback by Maria Gonzalez"})
+    assert clean["message"] == "chargeback by [REDACTED]"
+    assert clean["contains_pii"] is True and clean["redaction_mode"] == "rules-only"
 
 
 if __name__ == "__main__":

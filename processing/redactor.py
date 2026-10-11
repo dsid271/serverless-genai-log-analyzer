@@ -11,6 +11,8 @@ from presidio_anonymizer.entities import OperatorConfig
 
 import yaml
 
+from processing.learned_pii import LearnedEntities
+
 logger = logging.getLogger(__name__)
 
 # --- Tier 1: deterministic rules (always on, cannot fail) --------------------
@@ -56,13 +58,20 @@ def _mask_email(match: re.Match) -> str:
 
 
 class RuleRedactor:
-    """Fast, deterministic, zero-dependency. The floor that always applies."""
+    """Fast, deterministic, zero-dependency. The floor that always applies.
+
+    `learned` (processing/learned_pii.py) adds entities that NER found earlier."""
+
+    def __init__(self, learned: Optional[Any] = None):
+        self.learned = learned
 
     def apply(self, text: str) -> Tuple[str, bool]:
         original = text
         text = CARD_RE.sub(_mask_card, text)
         text = SSN_RE.sub("***-**-****", text)
         text = EMAIL_RE.sub(_mask_email, text)
+        if self.learned is not None:
+            text, _ = self.learned.apply(text)
         return text, text != original
 
 
@@ -116,7 +125,7 @@ class LogRedactor:
                         "stack_trace", "raw", "body", "query"}
 
     def __init__(self, profile: str = "financial", model_size: str = "sm",
-                 pseudonym_key: Optional[bytes] = None):
+                 pseudonym_key: Optional[bytes] = None, use_ner: bool = True):
         self.profile = profile
         self.rules = RuleRedactor()
         self.analyzer = None
@@ -135,6 +144,13 @@ class LogRedactor:
         self.operators = self._build_operators(self.config)
         self.allow_list = self.config.get("allow_list", [])
         self.ip_allow = tuple(self.config.get("ip_allow_prefixes", []))
+        # Without NER nothing new is learned; the store is only read.
+        self.learned = LearnedEntities.from_env(self._key, self.allow_list, read_only=not use_ner)
+        self.rules = RuleRedactor(self.learned)
+        if not use_ner:
+            logger.info("NER disabled by caller; rules-only mode (learned entities: %s).",
+                        "on" if self.learned is not None else "off")
+            return
         try:
             model = self.config.get("nlp_model", f"en_core_web_{model_size}")
             self.analyzer, self.anonymizer = _EngineCache.get(profile, model, self.config)
@@ -210,6 +226,8 @@ class LogRedactor:
                 allow_list=self.allow_list,
             )
             results = [r for r in results if not self._is_internal_ip(text, r)]
+            if self.learned is not None:
+                self.learned.observe(text, results)
             ner_changed = False
             if results:
                 text = self.anonymizer.anonymize(
