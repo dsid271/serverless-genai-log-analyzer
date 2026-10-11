@@ -7,7 +7,6 @@ import threading
 from collections import OrderedDict
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
-from presidio_anonymizer.entities import OperatorConfig
 
 import yaml
 
@@ -141,7 +140,7 @@ class LogRedactor:
         self.config = self._load_config(profile)
         self.entities = self.config.get("entities")
         self.score_threshold = self.config.get("score_threshold", 0.4)
-        self.operators = self._build_operators(self.config)
+        self.operators: dict = {}
         self.allow_list = self.config.get("allow_list", [])
         self.ip_allow = tuple(self.config.get("ip_allow_prefixes", []))
         # Without NER nothing new is learned; the store is only read.
@@ -152,6 +151,7 @@ class LogRedactor:
                         "on" if self.learned is not None else "off")
             return
         try:
+            self.operators = self._build_operators(self.config)
             model = self.config.get("nlp_model", f"en_core_web_{model_size}")
             self.analyzer, self.anonymizer = _EngineCache.get(profile, model, self.config)
             self.ner_available = True
@@ -167,6 +167,8 @@ class LogRedactor:
                          "Named-entity PII will NOT be caught.", e)
 
     def _build_operators(self, cfg: dict) -> dict:
+        from presidio_anonymizer.entities import OperatorConfig
+
         ops = {}
         for entity, spec in (cfg.get("operators") or {}).items():
             spec = dict(spec)

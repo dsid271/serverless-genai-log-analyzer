@@ -36,6 +36,8 @@ class CandidateHandler:
             "window_start": c.get("window_start"),
             "window_end": c.get("window_end"),
             "threshold": c.get("threshold"),
+            "baseline": c.get("baseline"),
+            "reason": c.get("reason", "threshold"),
             "count": count,
             "critical_count": int(c.get("critical_count") or 0),
             "contains_pii": bool(c.get("contains_pii", False)),

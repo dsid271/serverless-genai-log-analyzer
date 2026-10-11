@@ -398,7 +398,11 @@ curl.exe -s http://localhost:8000/incidents -H "X-API-Key: $admin"
 For sustained high volume (thousands of events per second), `spark/streaming_job.py` replaces the `kafka` connector as the consumer of `logs-raw`. It reuses the same bricks: format profiles, rule-tier redaction including learned entities (NER is off in Spark), and message patterns.
 
 1. **`logs` query**: Kafka → normalize → redact → `pattern_id` → Delta Lake at `SPARK_DELTA_PATH`, partitioned by `date` and `source`.
-2. **`spikes` query**: streams the Delta table, counts errors per source in event-time windows (`SPARK_SPIKE_WINDOW`, late data allowed up to `SPARK_WATERMARK`), and publishes windows with at least `SPARK_SPIKE_THRESHOLD` errors (default: `ERROR_SPIKE_THRESHOLD`) to `SPARK_CANDIDATES_TOPIC` (`incident-candidates`).
+2. **`spikes` query**: streams the Delta table, counts errors per source in event-time windows (`SPARK_SPIKE_WINDOW`, late data allowed up to `SPARK_WATERMARK`), and publishes spikes to `SPARK_CANDIDATES_TOPIC` (`incident-candidates`). A spike is judged against the source's own baseline (`spark/baseline.py`), so a service that always logs 50 errors a minute does not alert, while a quiet one jumping from 2 to 12 does:
+   - **Baseline**: a rolling average (EWMA, `SPARK_BASELINE_ALPHA`) of errors per window per source. Windows with no errors count as zero.
+   - **Spike**: count ≥ `SPARK_BASELINE_FACTOR` × baseline and ≥ `SPARK_BASELINE_MIN_COUNT`.
+   - **Warm-up**: until a source has `SPARK_BASELINE_WARMUP` windows, the fixed `SPARK_SPIKE_THRESHOLD` (default: `ERROR_SPIKE_THRESHOLD`) applies. `SPARK_BASELINE_FACTOR=0` keeps the fixed threshold always.
+   - **State**: kept in `<SPARK_CHECKPOINT_DIR>/baseline.json`, so it survives restarts. Each candidate carries `threshold`, `baseline` and `reason` (`threshold` or `baseline`).
 3. **API**: the `spark_candidates` connector consumes that topic and raises `error_spike` incidents through the normal triage, routing, analyzer and ticketing path, once per source and window.
 
 ```powershell
@@ -407,9 +411,10 @@ docker compose --profile kafka --profile spark up -d kafka spark api
 ```
 
 - **Runtime**: one container (`Dockerfile.spark`, Java 21, `local[*]`). The Kafka and Delta jars download on first start and are cached in the `spark-ivy` volume. The Spark UI is on http://localhost:4040.
-- **Shared state**: the container mounts `./data` and reads `.env`. `PII_PSEUDONYM_KEY` must match the api so learned entities apply.
-- **Delta tables**: Spark writes `data/delta-lake/logs_stream`, separate from the api's `data/delta-lake/logs`.
-- **Other settings**: `SPARK_TRIGGER` (`10 seconds`), `SPARK_MAX_OFFSETS_PER_TRIGGER` (200000), `SPARK_STARTING_OFFSETS` (`latest`), `SPARK_FORMAT_PROFILE`, `SPARK_CHECKPOINT_DIR`, `SPARK_SPIKE_OUTPUT_MODE` (`update` = alert as soon as a window crosses the threshold; `append` = once, after the watermark passes).
+- **Shared state**: the container reads `.env` and `./data/learned_pii.sqlite3`. `PII_PSEUDONYM_KEY` must match the api so learned entities apply.
+- **Delta tables**: in Compose, Spark writes `/spark-data/delta-lake/logs_stream` and its checkpoints in the `spark-data` volume, not in `./data`. Each batch writes many small files, which is slow on a host bind mount (measured on a OneDrive folder: ~150 s lag vs ~50 s in a volume). This table is separate from the api's `data/delta-lake/logs`.
+- **Other settings**: `SPARK_TRIGGER` (`10 seconds`), `SPARK_MAX_OFFSETS_PER_TRIGGER` (200000), `SPARK_KAFKA_MIN_PARTITIONS` (number of cores), `SPARK_STARTING_OFFSETS` (`latest`), `SPARK_FORMAT_PROFILE`, `SPARK_CHECKPOINT_DIR`, `SPARK_SPIKE_OUTPUT_MODE` (`update` = alert as soon as a window crosses the threshold; `append` = once, after the watermark passes).
+- **Load test**: `uv run python scripts/load_test.py --rate 2000 --duration 30` sends synthetic logs (fake PII) to `logs-raw` and reads the Spark UI until the `logs` query has processed them. It reports producer rate, end-to-end throughput and lag after the last send. Start it after the job is up: with `SPARK_STARTING_OFFSETS=latest` a fresh job skips logs sent before its first batch. `--delta <host path>` also counts this run's rows in the table when `SPARK_DELTA_PATH` is on the host.
 
 ---
 

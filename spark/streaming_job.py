@@ -3,16 +3,19 @@
   Kafka (logs-raw) -> format profile -> rule redaction (+ learned entities) -> pattern id
     -> Delta Lake, partitioned by date and source              (query "logs")
   Delta stream -> per-source error counts in event-time windows with a watermark
-    -> windows at or above the threshold go to Kafka (incident-candidates)   (query "spikes")
+    -> windows above the source's baseline (spark/baseline.py) go to Kafka
+       (incident-candidates)                                                 (query "spikes")
 
 The API consumes incident-candidates with the `spark_candidates` connector.
 Run: python -m spark.streaming_job   (needs Java 17+; see Dockerfile.spark)
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 
+from spark.baseline import SpikeBaseline
 from spark.transform import COLUMNS, process_frames
 
 logger = logging.getLogger("spark.streaming_job")
@@ -62,6 +65,8 @@ def normalized_logs(spark, bootstrap: str):
         .option("subscribe", _env("SPARK_LOG_TOPIC", _env("LOG_TOPIC", "logs-raw")))
         .option("startingOffsets", _env("SPARK_STARTING_OFFSETS", "latest"))
         .option("maxOffsetsPerTrigger", _env("SPARK_MAX_OFFSETS_PER_TRIGGER", "200000"))
+        # Split Kafka partitions into more tasks so redaction uses every core.
+        .option("minPartitions", _env("SPARK_KAFKA_MIN_PARTITIONS", str(spark.sparkContext.defaultParallelism)))
         .option("failOnDataLoss", "false")
         .load()
     )
@@ -74,11 +79,11 @@ def normalized_logs(spark, bootstrap: str):
     )
 
 
-def spike_candidates(logs, threshold: int, window: str, watermark: str):
-    """Per-source error counts per event-time window; rows at or above `threshold`."""
+def window_counts(logs, window: str, watermark: str):
+    """Per-source error counts per event-time window (all windows; the baseline filters)."""
     from pyspark.sql import functions as F
 
-    counts = (
+    return (
         logs.filter(F.col("is_error"))
         .withWatermark("event_time", watermark)
         .groupBy(F.window("event_time", window).alias("w"), F.col("source"))
@@ -89,20 +94,46 @@ def spike_candidates(logs, threshold: int, window: str, watermark: str):
             F.approx_count_distinct("pattern_id").alias("patterns"),
             F.first("message", ignorenulls=True).alias("sample"),
         )
-        .filter(F.col("count") >= threshold)
+        .select("source", F.unix_timestamp("w.start").alias("start"), F.unix_timestamp("w.end").alias("end"),
+                "count", "critical_count", "pii", "patterns", "sample")
     )
-    payload = F.struct(
-        F.col("source"),
-        F.date_format("w.start", "yyyy-MM-dd'T'HH:mm:ss'Z'").alias("window_start"),
-        F.date_format("w.end", "yyyy-MM-dd'T'HH:mm:ss'Z'").alias("window_end"),
-        F.col("count"),
-        F.col("critical_count"),
-        (F.col("pii") == 1).alias("contains_pii"),
-        F.col("patterns"),
-        F.col("sample"),
-        F.lit(threshold).alias("threshold"),
-    )
-    return counts.select(F.col("source").alias("key"), F.to_json(payload).alias("value"))
+
+
+def _iso(epoch: float) -> str:
+    import datetime as dt
+
+    return dt.datetime.fromtimestamp(epoch, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def candidate_payload(row: dict) -> dict:
+    return {
+        "source": row["source"],
+        "window_start": _iso(row["start"]),
+        "window_end": _iso(row["end"]),
+        "count": int(row["count"]),
+        "critical_count": int(row.get("critical_count") or 0),
+        "contains_pii": row.get("pii") == 1,
+        "patterns": row.get("patterns"),
+        "sample": row.get("sample"),
+        "threshold": row["threshold"],
+        "baseline": row["baseline"],
+        "reason": row["reason"],
+    }
+
+
+def spike_publisher(baseline: SpikeBaseline, bootstrap: str, topic: str):
+    """foreachBatch function: updated window counts -> baseline check -> Kafka."""
+    def publish(batch_df, batch_id: int) -> None:
+        rows = [r.asDict() for r in batch_df.collect()]
+        spikes = baseline.evaluate(rows) if rows else []
+        if not spikes:
+            return
+        records = [(s["source"], json.dumps(candidate_payload(s))) for s in spikes]
+        (batch_df.sparkSession.createDataFrame(records, "key string, value string")
+         .write.format("kafka").option("kafka.bootstrap.servers", bootstrap)
+         .option("topic", topic).save())
+        logger.info("batch %s: published %d spike candidate(s)", batch_id, len(spikes))
+    return publish
 
 
 def _ensure_table(spark, path: str) -> None:
@@ -132,18 +163,20 @@ def main() -> None:
      .option("checkpointLocation", os.path.join(checkpoints, "logs"))
      .trigger(processingTime=trigger).start(delta_path))
 
-    spikes = spike_candidates(
+    counts = window_counts(
         spark.readStream.format("delta").load(delta_path),
-        threshold=int(_env("SPARK_SPIKE_THRESHOLD", _env("ERROR_SPIKE_THRESHOLD", "20"))),
         window=_env("SPARK_SPIKE_WINDOW", "60 seconds"),
         watermark=_env("SPARK_WATERMARK", "2 minutes"),
     )
-    # "update" emits a window as soon as it crosses the threshold (and again as it grows);
-    # the API connector raises one incident per (source, window_start).
-    (spikes.writeStream.queryName("spikes").format("kafka")
+    baseline = SpikeBaseline.from_env(
+        threshold=int(_env("SPARK_SPIKE_THRESHOLD", _env("ERROR_SPIKE_THRESHOLD", "20"))),
+        state_path=os.path.join(checkpoints, "baseline.json"),
+    )
+    # "update" hands over a window each time its count changes, so it can alert as soon as it
+    # crosses; the baseline publishes each (source, window) once.
+    (counts.writeStream.queryName("spikes")
      .outputMode(_env("SPARK_SPIKE_OUTPUT_MODE", "update"))
-     .option("kafka.bootstrap.servers", bootstrap)
-     .option("topic", _env("SPARK_CANDIDATES_TOPIC", "incident-candidates"))
+     .foreachBatch(spike_publisher(baseline, bootstrap, _env("SPARK_CANDIDATES_TOPIC", "incident-candidates")))
      .option("checkpointLocation", os.path.join(checkpoints, "spikes"))
      .trigger(processingTime=trigger).start())
 

@@ -66,8 +66,9 @@ services:
 
   # Spark Structured Streaming job (spark/streaming_job.py). Opt-in:
   # `docker compose --profile kafka --profile spark up -d`.
-  # Shares .env (PII_PSEUDONYM_KEY must match the api for learned entities) and ./data
-  # (Delta output, checkpoints, learned_pii.sqlite3) with the api.
+  # Shares .env (PII_PSEUDONYM_KEY must match the api for learned entities) and
+  # ./data/learned_pii.sqlite3 with the api. Delta output and checkpoints live in the
+  # spark-data volume: many small files per batch are slow on a host bind mount.
   spark:
     build:
       context: .
@@ -77,12 +78,13 @@ services:
       - .env
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-      - SPARK_DELTA_PATH=/app/data/delta-lake/logs_stream
-      - SPARK_CHECKPOINT_DIR=/app/data/spark-checkpoints
+      - SPARK_DELTA_PATH=/spark-data/delta-lake/logs_stream
+      - SPARK_CHECKPOINT_DIR=/spark-data/checkpoints
       - PII_LEARNED_DB=/app/data/learned_pii.sqlite3
       - SPARK_IVY_DIR=/opt/ivy
     volumes:
       - ./data:/app/data
+      - spark-data:/spark-data
       - spark-ivy:/opt/ivy
     ports:
       - "4040:4040"
@@ -90,4 +92,5 @@ services:
       - kafka
 
 volumes:
+  spark-data:
   spark-ivy:

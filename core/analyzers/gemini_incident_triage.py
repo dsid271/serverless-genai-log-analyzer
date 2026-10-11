@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from core.knowledge import KnowledgeBase, incident_query
 
 _ALLOWED = ("kind", "message")
-_ALLOWED_DETAILS = ("window_seconds", "threshold", "count", "critical_count", "samples", "sources", "source_counts")
+_ALLOWED_DETAILS = ("window_seconds", "threshold", "baseline", "count", "critical_count", "samples", "sources", "source_counts")
 _ALLOWED_DEPLOYMENT = ("service", "version", "environment", "deployed_at", "commit_sha")
 _MAX_DOC_CHARS = 1500
 

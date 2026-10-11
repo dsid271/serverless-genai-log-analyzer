@@ -170,7 +170,8 @@ def test_spark_candidates_raise_one_incident_per_window(monkeypatch, tmp_path):
     incident_bus = EventBus()
     handler = CandidateHandler(triage, incident_bus)
     cand = {"source": "payments-api", "window_start": "2026-10-11T10:00:00Z", "window_end": "2026-10-11T10:01:00Z",
-            "count": 25, "critical_count": 2, "contains_pii": True, "patterns": 3, "sample": "boom", "threshold": 20}
+            "count": 25, "critical_count": 2, "contains_pii": True, "patterns": 3, "sample": "boom", "threshold": 20,
+            "baseline": 4.5, "reason": "baseline"}
 
     async def scenario():
         await handler([cand, {**cand, "count": 40}])           # same window re-sent in update mode
@@ -184,3 +185,49 @@ def test_spark_candidates_raise_one_incident_per_window(monkeypatch, tmp_path):
     assert first["kind"] == "error_spike" and first["details"]["origin"] == "spark"
     assert first["details"]["count"] == 25 and first["details"]["contains_pii"] is True
     assert first["routing"]["team"] == "payments"
+    assert first["details"]["baseline"] == 4.5 and first["details"]["reason"] == "baseline"
+
+
+def _windows(source, counts, start=0, length=60):
+    return [{"source": source, "start": start + i * length, "end": start + (i + 1) * length, "count": c}
+            for i, c in enumerate(counts)]
+
+
+def test_baseline_uses_fixed_threshold_until_warm_then_per_source_average():
+    from spark.baseline import SpikeBaseline
+
+    b = SpikeBaseline(threshold=20, factor=3.0, min_count=5, alpha=0.5, warmup=3)
+    # Warm-up: only the fixed threshold applies.
+    out = b.evaluate(_windows("noisy", [30, 30, 30]) + _windows("quiet", [2, 2, 2]))
+    assert [(o["source"], o["reason"]) for o in out] == [("noisy", "threshold")] * 3
+    # Warm (the third window closes when the fourth arrives): noisy's 35 is normal, quiet's 12 is a spike.
+    out = b.evaluate(_windows("noisy", [35], start=180) + _windows("quiet", [12], start=180))
+    assert [(o["source"], o["reason"], o["baseline"]) for o in out] == [("quiet", "baseline", 2.0)]
+    assert out[0]["threshold"] == 6.0
+
+
+def test_baseline_publishes_each_window_once_counts_gaps_and_persists(tmp_path):
+    from spark.baseline import SpikeBaseline
+
+    path = str(tmp_path / "baseline.json")
+    b = SpikeBaseline(threshold=5, factor=2.0, min_count=3, alpha=0.5, warmup=2, state_path=path)
+    assert len(b.evaluate(_windows("api", [6]))) == 1
+    assert b.evaluate(_windows("api", [9])) == []                # update mode re-sends the same window
+    # 60 is judged on the fixed threshold; by 120, windows 0 (9) and 60 (10) are closed -> warm.
+    assert [o["start"] for o in b.evaluate(_windows("api", [10, 10], start=60))] == [60]
+    assert b.baseline("api") == 9.5
+    assert b.evaluate(_windows("api", [10], start=600)) == []   # 10 < 2 x 9.75
+    b.evaluate(_windows("api", [1], start=660))                 # 600 closes after 7 empty windows
+    assert b.baseline("api") < 5.1                              # 9.75 decayed by the zeros, then 10 added
+    restored = SpikeBaseline(threshold=5, factor=2.0, min_count=3, alpha=0.5, warmup=2, state_path=path)
+    assert restored.baseline("api") == b.baseline("api")
+    assert restored.evaluate(_windows("api", [50], start=60)) == []    # published before the restart
+
+
+def test_candidate_payload_shape():
+    from spark.streaming_job import candidate_payload
+
+    p = candidate_payload({"source": "a", "start": 1791712800, "end": 1791712860, "count": 7, "critical_count": 1,
+                           "pii": 1, "patterns": 2, "sample": "x", "threshold": 6.0, "baseline": 2.0,
+                           "reason": "baseline"})
+    assert p["window_start"].endswith("Z") and p["contains_pii"] is True and p["reason"] == "baseline"
