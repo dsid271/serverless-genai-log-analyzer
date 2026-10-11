@@ -30,6 +30,21 @@ class SystemOrchestrator:
         self._index_lock = threading.Lock()
         self._index_chunk = int(os.getenv("VECTOR_INDEX_CHUNK", "64"))
         self._index_tasks: set = set()
+        # "pattern" embeds one example per message pattern (re-embedded after the TTL);
+        # "all" embeds every log. Delta Lake always stores every log either way.
+        self._index_mode = os.getenv("VECTOR_INDEX_MODE", "pattern").strip().lower()
+        if self._index_mode not in ("pattern", "all"):
+            raise ValueError(f"VECTOR_INDEX_MODE must be 'pattern' or 'all', got {self._index_mode!r}")
+        self._sampler = None
+        if self._index_mode == "pattern":
+            from processing.log_pattern import PatternSampler
+            self._sampler = PatternSampler(
+                ttl_seconds=float(os.getenv("VECTOR_PATTERN_TTL_SECONDS", "3600")),
+                max_patterns=int(os.getenv("VECTOR_PATTERN_MAX", "100000")),
+            )
+
+    def _select_for_index(self, logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return self._sampler.select(logs) if self._sampler is not None else logs
 
     async def ingest_single_log(self, raw_log: Dict[str, Any]):
         """Runs a single log through the full pipeline."""
@@ -49,12 +64,16 @@ class SystemOrchestrator:
         self.storage.save_logs([processed_log])
         
         # 3. Index in Vector DB
-        self.vector_store.add_logs([processed_log])
-        
+        to_index = self._select_for_index([processed_log])
+        if to_index:
+            self.vector_store.add_logs(to_index)
+
         return processed_log
 
     def _index_sync(self, logs: List[Dict[str, Any]]) -> None:
         with self._index_lock:
+            # Pattern matching runs here, in the worker thread, not on the event loop.
+            logs = self._select_for_index(logs)
             for i in range(0, len(logs), self._index_chunk):
                 try:
                     self.vector_store.add_logs(logs[i:i + self._index_chunk])

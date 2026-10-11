@@ -245,3 +245,61 @@ def test_ip_enrichment_adds_flat_fields_for_public_ips_only():
     assert out[0]["source_ip_country"] == "NL" and out[0]["source_ip_malicious"] is True
     assert out[0]["source_ip_scope"] == "public" and out[0]["source_ip"] == "<redacted>"
     assert out[2]["source_ip_scope"] == "private" and "source_ip_country" not in out[2]
+
+
+def test_pattern_sampler_keeps_one_example_per_pattern_until_ttl():
+    from processing.log_pattern import PatternSampler, message_pattern
+
+    assert message_pattern("timeout after 350ms on 10.0.0.7 req 3f2a9b7c1d") == \
+        message_pattern("timeout after 12ms on 10.0.0.9 req aa11bb22cc")
+
+    now = [0.0]
+    sampler = PatternSampler(ttl_seconds=60, clock=lambda: now[0])
+    base = {"source": "billing", "severity": "ERROR"}
+    batch = [
+        {**base, "message": "timeout after 350ms"},
+        {**base, "message": "timeout after 12ms"},
+        {**base, "message": "disk full"},
+        {"source": "other", "severity": "ERROR", "message": "timeout after 5ms"},
+    ]
+    picked = sampler.select(batch)
+    assert [p["message"] for p in picked] == ["timeout after 350ms", "disk full", "timeout after 5ms"]
+    assert all(p["pattern_id"] for p in picked)
+    assert "pattern_id" not in batch[0]          # inputs are not modified
+
+    assert sampler.select(batch) == []
+    now[0] = 61.0
+    assert len(sampler.select(batch)) == 3        # TTL expired: refreshed
+
+
+def test_orchestrator_embeds_patterns_only_and_all_mode_embeds_everything(monkeypatch):
+    import asyncio
+    from api.orchestrator import SystemOrchestrator
+
+    class Enricher:
+        def process_logs(self, logs):
+            return [dict(log) for log in logs]
+
+    class Store:
+        def save_logs(self, logs):
+            pass
+
+    class Vectors:
+        def __init__(self):
+            self.docs = []
+
+        def add_logs(self, logs):
+            self.docs.extend(logs)
+
+    logs = [{"source": "s", "severity": "ERROR", "message": f"timeout after {n}ms"} for n in range(5)]
+
+    async def run(mode):
+        monkeypatch.setenv("VECTOR_INDEX_MODE", mode)
+        vectors = Vectors()
+        orch = SystemOrchestrator(Enricher(), Store(), vectors, engine=None)
+        await orch.ingest_logs(logs)
+        await asyncio.gather(*orch._index_tasks)
+        return vectors.docs
+
+    assert len(asyncio.run(run("pattern"))) == 1
+    assert len(asyncio.run(run("all"))) == 5

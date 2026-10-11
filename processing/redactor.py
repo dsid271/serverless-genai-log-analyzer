@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import threading
+from collections import OrderedDict
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 from presidio_anonymizer.entities import OperatorConfig
@@ -121,6 +122,10 @@ class LogRedactor:
         self.analyzer = None
         self.anonymizer = None
         self.ner_available = False
+        # Exact-text cache of NER results (0 disables it).
+        self._ner_cache_size = int(os.getenv("NER_CACHE_SIZE", "4096"))
+        self._ner_cache: "OrderedDict[str, Tuple[str, bool]]" = OrderedDict()
+        self._ner_cache_lock = threading.Lock()
         self._key = pseudonym_key or os.environ.get(
             "PII_PSEUDONYM_KEY", "dev-only-change-me").encode()
 
@@ -189,8 +194,14 @@ class LogRedactor:
         if not self.ner_available or not text:
             return text, changed
 
+        # Identical messages are common; the NER result depends only on the text,
+        # so a repeat is answered from the cache with no loss of coverage.
+        cached = self._ner_cache_get(text)
+        if cached is not None:
+            return cached[0], changed or cached[1]
+
+        source = text
         try:
-            # in redact_text
             results = self.analyzer.analyze(
                 text=text,
                 entities=self.entities,
@@ -199,14 +210,35 @@ class LogRedactor:
                 allow_list=self.allow_list,
             )
             results = [r for r in results if not self._is_internal_ip(text, r)]
+            ner_changed = False
             if results:
                 text = self.anonymizer.anonymize(
                     text=text, analyzer_results=results, operators=self.operators
                 ).text
-                changed = True
+                ner_changed = True
+            self._ner_cache_put(source, text, ner_changed)   # failures are not cached
+            changed = changed or ner_changed
         except Exception as e:
             logger.error("NER pass failed, rules already applied: %s", e)
         return text, changed
+
+    def _ner_cache_get(self, key: str) -> Optional[Tuple[str, bool]]:
+        if self._ner_cache_size <= 0:
+            return None
+        with self._ner_cache_lock:
+            hit = self._ner_cache.get(key)
+            if hit is not None:
+                self._ner_cache.move_to_end(key)
+            return hit
+
+    def _ner_cache_put(self, key: str, text: str, ner_changed: bool) -> None:
+        if self._ner_cache_size <= 0:
+            return
+        with self._ner_cache_lock:
+            self._ner_cache[key] = (text, ner_changed)
+            self._ner_cache.move_to_end(key)
+            while len(self._ner_cache) > self._ner_cache_size:
+                self._ner_cache.popitem(last=False)
 
     def _walk(self, node: Any, path: str, hits: List[str]) -> Any:
         if isinstance(node, dict):

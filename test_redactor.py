@@ -41,6 +41,33 @@ def test_redactor_pii_metadata():
     assert "john.doe@example.com" not in clean["message"]
 
 
+def test_ner_results_are_cached_for_identical_text():
+    redactor = LogRedactor(profile="financial")
+    if not redactor.ner_available:
+        return  # rules-only environment: nothing to cache
+
+    calls = []
+    real = redactor.analyzer.analyze
+
+    def counting(**kwargs):
+        calls.append(kwargs["text"])
+        return real(**kwargs)
+
+    redactor.analyzer.analyze = counting
+    text = "Payment declined for customer Maria Gonzalez in Madrid"
+    first = redactor.redact_text(text)
+    second = redactor.redact_text(text)
+    assert first == second
+    assert len(calls) == 1
+
+
+def test_ner_cache_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("NER_CACHE_SIZE", "0")
+    redactor = LogRedactor(profile="financial")
+    redactor._ner_cache_put("x", "y", True)
+    assert redactor._ner_cache_get("x") is None
+
+
 if __name__ == "__main__":
     # Test common financial logs
     test_production_redaction(profile="financial")

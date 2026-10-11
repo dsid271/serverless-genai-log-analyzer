@@ -50,7 +50,19 @@ class VectorStore:
             doc = log.get("message") or log.get("raw") or str(log)
             documents.append(str(doc))
             metadatas.append(_clean_metadata(log))
-            ids.append(f"{log.get('request_id', 'log')}-{uuid.uuid4().hex[:12]}")
+            pid = log.get("pattern_id")
+            # Pattern examples get a stable id so a refreshed example replaces the old one.
+            ids.append(f"pattern-{pid}" if pid else f"{log.get('request_id', 'log')}-{uuid.uuid4().hex[:12]}")
+
+        if any(i.startswith("pattern-") for i in ids):
+            # Upsert rejects duplicate ids within one call; keep the last of each.
+            latest = {i: n for n, i in enumerate(ids)}
+            keep = sorted(latest.values())
+            documents = [documents[n] for n in keep]
+            metadatas = [metadatas[n] for n in keep]
+            ids = [ids[n] for n in keep]
+            self.collection.upsert(documents=documents, metadatas=metadatas, ids=ids)
+            return
 
         self.collection.add(
             documents=documents,
