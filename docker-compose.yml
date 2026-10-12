@@ -13,6 +13,9 @@ services:
       - CHROMA_PATH=/app/data/chroma
       - DELTA_LAKE_PATH=/app/data/delta-lake
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      # Load tests: set LOADTEST_PII_DB=/app/data/loadtest_pii.sqlite3 (for api and spark) so the
+      # NER pass on synthetic logs does not write rules into the real learned-PII DB.
+      - PII_LEARNED_DB=${LOADTEST_PII_DB:-./data/learned_pii.sqlite3}
 
   # Observability stack (local-only, zero cost). Scrapes GET /metrics on the
   # api service; disabled/no-op automatically if prometheus-client isn't
@@ -80,7 +83,7 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - SPARK_DELTA_PATH=/spark-data/delta-lake/logs_stream
       - SPARK_CHECKPOINT_DIR=/spark-data/checkpoints
-      - PII_LEARNED_DB=/app/data/learned_pii.sqlite3
+      - PII_LEARNED_DB=${LOADTEST_PII_DB:-/app/data/learned_pii.sqlite3}
       - SPARK_IVY_DIR=/opt/ivy
     volumes:
       - ./data:/app/data

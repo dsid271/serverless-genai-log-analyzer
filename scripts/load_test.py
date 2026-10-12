@@ -79,12 +79,25 @@ def _ui_time(value: str) -> float:
     return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%f%Z").replace(tzinfo=dt.timezone.utc).timestamp()
 
 
+def is_kafka_read(stage: dict) -> bool:
+    """True for a `logs` stage that reads Kafka rows, False for Delta's own bookkeeping stages.
+
+    Kafka stages report input records but no input bytes and no shuffle. Delta's log/checkpoint
+    stages scan parquet (input bytes > 0) and shuffle, and would otherwise be counted as extra rows."""
+    return (int(stage.get("inputRecords") or 0) > 0
+            and not int(stage.get("inputBytes") or 0)
+            and not int(stage.get("shuffleReadRecords") or 0)
+            and not int(stage.get("shuffleWriteRecords") or 0))
+
+
 def landed_rows(ui: str, since: float) -> tuple:
-    """(rows read by `logs` query stages completed since `since`, newest completion time in s)."""
+    """(Kafka rows read by `logs` query stages completed since `since`, newest completion time in s)."""
     app = _get(f"{ui}/api/v1/applications")[0]["id"]
     rows, newest = 0, 0.0
     for s in _get(f"{ui}/api/v1/applications/{app}/stages?status=complete"):
         if not (s.get("description") or "").startswith("logs") or not s.get("completionTime"):
+            continue
+        if not is_kafka_read(s):
             continue
         done = _ui_time(s["completionTime"])
         if done < since:

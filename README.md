@@ -41,7 +41,7 @@ On-call engineers face thousands of near-identical log lines that often contain 
 - **PII redaction quality is not measured**: there is no evaluation set. Without the spaCy model it runs in rules-only mode and will not catch names.
 - **Storage is local disk** (`./data/delta-lake`, `./data/chroma`), so it is ephemeral on serverless platforms.
 - **Auth is off by default** (`ENABLE_AUTH=false`).
-- **Not verified end to end**: the Kafka connector under load, and the Prometheus/Grafana stack.
+- **Verified end to end (local, 2026-10-12)**: Kafka → Spark → API → incident through the `spark_candidates` connector, and the Prometheus/Grafana stack, with ticket dispatch off. **Not verified**: ticketing (PagerDuty, ServiceNow and webhook are only tested with fakes) and the API's own `kafka` log connector under load.
 - **No fallbacks**: if the redactor, Delta Lake, or Chroma cannot start, the API refuses to start. Without `GEMINI_API_KEY`, `POST /analyze` returns 503.
 - **Test coverage is thin**: 84 tests cover the API, auth and rate limiting, key issuance, audit logger, redactor, error-spike detector, triage, ticket dispatch, webhook signing and IP enrichment. There are no tests for the Kafka connector, analyzers, or the LLM path.
 
