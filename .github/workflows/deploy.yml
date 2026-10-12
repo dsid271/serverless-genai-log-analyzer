@@ -32,7 +32,7 @@ jobs:
         run: uv run python -m py_compile api/main.py
       # The spaCy model is not installed in CI, so redactor tests run in rules-only mode.
       - name: Test
-        run: uv run pytest test_api_endpoints.py test_audit.py test_redactor.py test_error_spike.py -q
+        run: uv run pytest test_api_endpoints.py test_audit.py test_redactor.py test_error_spike.py test_auth_rate_limit.py -q
 
   build_and_push:
     needs: test

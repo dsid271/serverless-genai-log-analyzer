@@ -43,7 +43,7 @@ On-call engineers face thousands of near-identical log lines that often contain 
 - **Auth is off by default** (`ENABLE_AUTH=false`).
 - **Not verified end to end**: the Kafka connector under load, and the Prometheus/Grafana stack.
 - **No fallbacks**: if the redactor, Delta Lake, or Chroma cannot start, the API refuses to start. Without `GEMINI_API_KEY`, `POST /analyze` returns 503.
-- **Test coverage is thin**: 15 tests cover the API, key issuance, audit logger, redactor, error-spike detector, triage, ticket dispatch, webhook signing and IP enrichment. There are no tests for the Kafka connector, analyzers, or the LLM path.
+- **Test coverage is thin**: 84 tests cover the API, auth and rate limiting, key issuance, audit logger, redactor, error-spike detector, triage, ticket dispatch, webhook signing and IP enrichment. There are no tests for the Kafka connector, analyzers, or the LLM path.
 
 ## System Architecture
 
