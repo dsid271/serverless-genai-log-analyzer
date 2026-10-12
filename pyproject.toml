@@ -29,11 +29,14 @@ dependencies = [
     "pyyaml>=6.0",
     "slowapi>=0.1.9",
     "structlog>=24.0.0",
-    "passlib[bcrypt]>=1.7.4",
+    "geoip2>=4.8",
 ]
 
 [project.optional-dependencies]
 dev = [
     "ruff>=0.4.0",
     "pytest>=8.0.0"
+]
+observability = [
+    "prometheus-client>=0.26.0",
 ]

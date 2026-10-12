@@ -12,7 +12,85 @@ services:
       - PYTHONUNBUFFERED=1
       - CHROMA_PATH=/app/data/chroma
       - DELTA_LAKE_PATH=/app/data/delta-lake
-  # Future-proofing: We can add Kafka/Weaviate here later
-  # vector-db:
-  #   image: semitechnologies/weaviate:latest
-  #   ...
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+
+  # Observability stack (local-only, zero cost). Scrapes GET /metrics on the
+  # api service; disabled/no-op automatically if prometheus-client isn't
+  # installed in the api image (see api/metrics.py).
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+  # Single-node Kafka (KRaft, no ZooKeeper). Opt-in: `docker compose --profile kafka up -d`.
+  # The api reaches it at kafka:29092 when ENABLED_CONNECTORS includes kafka;
+  # host tools use localhost:9092.
+  kafka:
+    image: apache/kafka:3.9.1
+    profiles: ["kafka"]
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+
+  # Spark Structured Streaming job (spark/streaming_job.py). Opt-in:
+  # `docker compose --profile kafka --profile spark up -d`.
+  # Shares .env (PII_PSEUDONYM_KEY must match the api for learned entities) and
+  # ./data/learned_pii.sqlite3 with the api. Delta output and checkpoints live in the
+  # spark-data volume: many small files per batch are slow on a host bind mount.
+  spark:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    profiles: ["spark"]
+    env_file:
+      - .env
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - SPARK_DELTA_PATH=/spark-data/delta-lake/logs_stream
+      - SPARK_CHECKPOINT_DIR=/spark-data/checkpoints
+      - PII_LEARNED_DB=/app/data/learned_pii.sqlite3
+      - SPARK_IVY_DIR=/opt/ivy
+    volumes:
+      - ./data:/app/data
+      - spark-data:/spark-data
+      - spark-ivy:/opt/ivy
+    ports:
+      - "4040:4040"
+    depends_on:
+      - kafka
+
+volumes:
+  spark-data:
+  spark-ivy:

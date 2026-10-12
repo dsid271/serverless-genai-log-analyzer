@@ -1,3 +1,4 @@
+import os
 from typing import Annotated, List
 from typing_extensions import TypedDict
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -14,6 +15,8 @@ class AgentState(TypedDict):
     documents: List[str]
     is_relevant: bool
     generation: str
+    attempts: int
+    
 
 class LogAnalysisEngine:
     """
@@ -22,7 +25,14 @@ class LogAnalysisEngine:
     """
     def __init__(self, gemini_api_key: str, vector_store: VectorStore):
         self.vector_store = vector_store
-        self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=gemini_api_key)
+        self.model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+        self.api_key = gemini_api_key
+        self._llm = ChatGoogleGenerativeAI(
+            model=self.model,
+            google_api_key=self.api_key,
+            temperature=0,
+            max_output_tokens=2048,
+        )
         self.workflow = self._create_workflow()
 
     def _create_workflow(self):
@@ -62,25 +72,33 @@ class LogAnalysisEngine:
         """Evaluates if documents are pertinent to the query."""
         # Multi-agent logic: Use LLM to score relevance
         prompt = f"Query: {state['query']}\nDocuments: {state['documents']}\nAre these relevant? (yes/no)"
-        response = self.llm.invoke(prompt)
+        response = self._llm.invoke(prompt)
         is_relevant = "yes" in response.content.lower()
         return {"is_relevant": is_relevant}
 
     def generate_node(self, state: AgentState):
         """Constructs the final technical response."""
         prompt = f"Context (Logs): {state['documents']}\nUser Question: {state['query']}\nProvide a technical analysis."
-        response = self.llm.invoke(prompt)
+        response = self._llm.invoke(prompt)
         return {"generation": response.content}
 
     def transform_query_node(self, state: AgentState):
         """Rewrites the query if retrieval fails."""
-        # Simple placeholder for query optimization
-        new_query = f"Optimized search for: {state['query']}"
-        return {"query": new_query}
+        prompt = (
+            "Rewrite this log-search query so a semantic search over application log "
+            "messages is more likely to find relevant entries. Return only the rewritten query.\n"
+            f"Query: {state['query']}"
+        )
+        response = self._llm.invoke(prompt)
+        rewritten = str(response.content).strip() or state["query"]
+        return {"query": rewritten, "attempts": state.get("attempts", 0) + 1}
 
     # --- Conditional Edge logic ---
     def decide_to_generate(self, state: AgentState):
-        return "yes" if state["is_relevant"] else "no"
+        if state["is_relevant"]:
+            return "yes"
+        return "no" if state.get("attempts", 0) < 2 else "yes"
+
 
     def analyze(self, query: str):
         """Executes the graph with the given user query."""

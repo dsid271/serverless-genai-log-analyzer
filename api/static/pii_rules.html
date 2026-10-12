@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PII rule suggestions</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 2rem; color: #222; }
+  header { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border-bottom: 1px solid #ddd; padding: .4rem .5rem; text-align: left; vertical-align: top; }
+  th { background: #f5f5f5; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  code { font: 13px ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
+  code b { background: #ffe9a8; font-weight: normal; padding: 0 2px; }
+  .counts span { margin-right: .75rem; }
+  #msg { color: #b00020; }
+  button { cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>PII rule suggestions</h1>
+<p>Each row is a message shape where NER keeps finding an entity in the same slot (highlighted).
+Approving it makes the rule tier redact that slot in matching messages, in the API and in Spark.
+Only counts and redacted shapes are stored, never the detected values.</p>
+<header>
+  <label>API key <input id="key" type="password" size="36" placeholder="only needed with ENABLE_AUTH=true"></label>
+  <label>Status
+    <select id="status">
+      <option>pending</option><option>approved</option><option>rejected</option>
+      <option>collecting</option><option>all</option>
+    </select>
+  </label>
+  <button id="reload">Reload</button>
+  <button data-decide="approved">Approve selected</button>
+  <button data-decide="rejected">Reject selected</button>
+  <button data-decide="pending">Reset selected to pending</button>
+  <span class="counts" id="counts"></span>
+  <span id="msg"></span>
+</header>
+<table>
+  <thead><tr>
+    <th><input type="checkbox" id="all" title="Select all"></th>
+    <th>Message shape</th><th>Entity</th><th>Hits</th><th>Distinct values</th>
+    <th>Status</th><th>Last seen</th><th>Decided by</th><th>Decided at</th>
+  </tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<script>
+const $ = (id) => document.getElementById(id);
+const keyInput = $("key");
+keyInput.value = sessionStorage.getItem("piiRulesKey") || "";
+// Kept for this browser tab only (cleared when the tab closes), never written to disk.
+keyInput.addEventListener("input", () => sessionStorage.setItem("piiRulesKey", keyInput.value.trim()));
+keyInput.addEventListener("change", () => load());
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+}
+
+async function api(path, options = {}) {
+  const headers = {"Content-Type": "application/json"};
+  if (keyInput.value.trim()) headers["X-API-Key"] = keyInput.value.trim();
+  const res = await fetch(path, {...options, headers});
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail ? JSON.stringify(body.detail) : res.statusText);
+  return body;
+}
+
+function when(ts) { return ts ? new Date(ts * 1000).toLocaleString() : ""; }
+
+function render(data) {
+  $("counts").innerHTML = Object.entries(data.counts).map(([s, n]) => `<span>${esc(s)}: <b>${n}</b></span>`).join("");
+  $("rows").innerHTML = data.rules.map((r) => `
+    <tr>
+      <td><input type="checkbox" class="pick" value="${esc(r.id)}"></td>
+      <td><code>${esc(r.display).replace(/\{([A-Z0-9_]+)\}/, "<b>$1</b>")}</code></td>
+      <td>${esc(r.entity)}</td>
+      <td class="num">${r.hits}</td>
+      <td class="num">${r.distinct_values}</td>
+      <td>${esc(r.status)}</td>
+      <td>${when(r.last_seen)}</td>
+      <td>${esc(r.decided_by) || "—"}</td>
+      <td>${when(r.decided_at) || "—"}</td>
+    </tr>`).join("") || `<tr><td colspan="9">No suggestions with this status.</td></tr>`;
+  $("all").checked = false;
+}
+
+async function load() {
+  $("msg").textContent = "";
+  try {
+    render(await api(`/admin/pii-rules?status=${encodeURIComponent($("status").value)}&limit=500`));
+  } catch (e) {
+    $("msg").textContent = e.message;
+  }
+}
+
+async function decide(status) {
+  const ids = [...document.querySelectorAll(".pick:checked")].map((c) => c.value);
+  if (!ids.length) { $("msg").textContent = "Select at least one row."; return; }
+  try {
+    await api("/admin/pii-rules/decisions", {method: "POST", body: JSON.stringify({ids, status})});
+    await load();
+  } catch (e) {
+    $("msg").textContent = e.message;
+  }
+}
+
+$("reload").addEventListener("click", load);
+$("status").addEventListener("change", load);
+$("all").addEventListener("change", (e) => document.querySelectorAll(".pick").forEach((c) => (c.checked = e.target.checked)));
+document.querySelectorAll("[data-decide]").forEach((b) => b.addEventListener("click", () => decide(b.dataset.decide)));
+load();
+</script>
+</body>
+</html>

@@ -1,12 +1,33 @@
 import os
+import uuid
 from typing import List, Dict, Any, Optional
 import chromadb
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+
+def _clean_metadata(md: Dict[str, Any]) -> Dict[str, Any]:
+    """Chroma only accepts scalar metadata values (str/int/float/bool).
+    Flatten lists, drop empties and Nones."""
+    out: Dict[str, Any] = {}
+    for k, v in md.items():
+        if isinstance(v, (list, tuple, set)):
+            if not v:
+                continue                          # empty list -> omit key entirely
+            out[k] = ",".join(map(str, v))
+        elif isinstance(v, bool) or isinstance(v, (str, int, float)):
+            out[k] = v
+        elif v is None:
+            continue
+        elif isinstance(v, dict):
+            continue                              # nested dicts unsupported
+        else:
+            out[k] = str(v)
+    return out
+
 
 class VectorStore:
     """
     Abstractions for Vector DB operations (ChromaDB).
-    Connects to the embedding model for log indexing.
+    Uses Chroma's built-in local embedding function (no external API calls).
     """
     def __init__(self, collection_name: str = "logs"):
         self.chroma_client = chromadb.PersistentClient(
@@ -15,34 +36,59 @@ class VectorStore:
         self.collection = self.chroma_client.get_or_create_collection(
             name=collection_name
         )
-        self.embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
 
     def add_logs(self, logs: List[Dict[str, Any]]):
         """Indexes processed logs into the vector store."""
-        documents = [log["message"] for log in logs]
-        metadatas = [log for log in logs]
-        ids = [log.get("request_id", f"id-{i}") for i, log in enumerate(logs)]
-        
+        if not logs:
+            return
+
+        documents: List[str] = []
+        metadatas: List[Dict[str, Any]] = []
+        ids: List[str] = []
+
+        for log in logs:
+            doc = log.get("message") or log.get("raw") or str(log)
+            documents.append(str(doc))
+            metadatas.append(_clean_metadata(log))
+            pid = log.get("pattern_id")
+            # Pattern examples get a stable id so a refreshed example replaces the old one.
+            ids.append(f"pattern-{pid}" if pid else f"{log.get('request_id', 'log')}-{uuid.uuid4().hex[:12]}")
+
+        if any(i.startswith("pattern-") for i in ids):
+            # Upsert rejects duplicate ids within one call; keep the last of each.
+            latest = {i: n for n, i in enumerate(ids)}
+            keep = sorted(latest.values())
+            documents = [documents[n] for n in keep]
+            metadatas = [metadatas[n] for n in keep]
+            ids = [ids[n] for n in keep]
+            self.collection.upsert(documents=documents, metadatas=metadatas, ids=ids)
+            return
+
         self.collection.add(
             documents=documents,
             metadatas=metadatas,
-            ids=ids
+            ids=ids,
         )
 
-    def search_logs(self, query: str, n_results: int = 5, where_filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def search_logs(
+        self,
+        query: str,
+        n_results: int = 5,
+        where_filter: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         """Semantic search for relevant logs."""
-        kwargs = {
+        kwargs: Dict[str, Any] = {
             "query_texts": [query],
-            "n_results": n_results
+            "n_results": n_results,
         }
         if where_filter:
             kwargs["where"] = where_filter
 
         results = self.collection.query(**kwargs)
-        
-        # Flatten results into a cleaner list of logs
-        flattened = []
-        if results["metadatas"]:
-            for meta in results["metadatas"][0]:
+
+        flattened: List[Dict[str, Any]] = []
+        metadatas = results.get("metadatas") or []
+        if metadatas and metadatas[0]:
+            for meta in metadatas[0]:
                 flattened.append(meta)
         return flattened

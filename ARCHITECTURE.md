@@ -42,7 +42,7 @@ flowchart TD
     style H fill:#ede7f6
 ```
 
-**Key Properties:**
+**Target Properties:**
 - **Throughput**: 100 MB/s – 10 GB/s (Kafka → Spark → Storage)
 - **Latency**: <2s P95 for API searches, <5s P95 for LLM analysis
 - **Compliance**: PII masking, audit trail, data retention enforcement
@@ -120,7 +120,9 @@ flowchart TD
 
 ---
 
-### 3. **Stream Processing (PySpark / Flink)** `[PARTIAL — FastAPI in-process only]`
+### 3. **Stream Processing (PySpark / Flink)** `[PARTIAL — local Spark job]`
+
+**Implemented today**: `spark/streaming_job.py` runs in one Docker container (`local[*]`, Compose profile `spark`). It reads `logs-raw`, applies format profiles, rule-tier redaction (with learned entities and approved PII rule suggestions) and message patterns, writes Delta Lake partitioned by `date`/`source`, and publishes windowed per-source error spikes to `incident-candidates`. The API's `spark_candidates` connector turns those into incidents. It has been run end-to-end locally; it has not been load-tested or deployed to a cluster. The rest of this section is the target design.
 
 **Purpose**: 
 - Parse, enrich, filter, and aggregate logs in real time
@@ -158,7 +160,7 @@ Mask sensitive data before storage/analysis:
 
 **Implementation**:
 - Use regex + ML-based detection (Presidio library)
-- Maintain accuracy >99% (minimize false positives)
+- Target: minimize false positives and missed PII (precision/recall not yet measured; no evaluation set exists)
 - Log all PII redactions for audit
 
 ```python

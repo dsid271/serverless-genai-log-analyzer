@@ -1,100 +1,115 @@
 import asyncio
 import json
 import logging
-from typing import Optional, Callable, Dict, Any
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-# Configure basic logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("KafkaConsumer")
 
+
+def _decode(raw: bytes) -> Optional[Dict[str, Any]]:
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 class LogConsumer:
+    """Async Kafka consumer: hands each polled batch of decoded logs to `on_batch`.
+
+    Redaction happens downstream in the orchestrator's enricher, the same path
+    as `POST /ingest`. Offsets are committed only after `on_batch` succeeds
+    (at-least-once delivery).
     """
-    Asynchronous Kafka consumer that ingests logs from a topic,
-    redacts PII, and passes them to a processor or storage.
-    """
+
     def __init__(
-        self, 
-        topic: str = "logs-raw", 
+        self,
+        on_batch: Callable[[List[Dict[str, Any]]], Awaitable[Any]],
+        topic: str = "logs-raw",
         bootstrap_servers: str = "localhost:9092",
         group_id: str = "log-analyzer-group",
-        redactor_profile: str = "financial"
+        max_batch: int = 500,
     ):
+        self.on_batch = on_batch
         self.topic = topic
         self.bootstrap_servers = bootstrap_servers
         self.group_id = group_id
-        try:
-            from processing.redactor import LogRedactor as DefaultRedactor
-        except Exception:
-            from processing.redactor_null import LogRedactor as DefaultRedactor
-
-        self.redactor = DefaultRedactor(profile=redactor_profile)
+        self.max_batch = max_batch
         self.consumer: Optional[Any] = None
         self._running = False
 
-    async def start(self, on_message_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
-        """
-        Starts the Kafka consumer loop with graceful failure.
-        """
+    async def start(self) -> bool:
+        """Connect only. Returns False if Kafka is unavailable (graceful degradation)."""
         try:
             from aiokafka import AIOKafkaConsumer
         except Exception as e:
-            logger.error(f"Kafka ingestion is not available (aiokafka not installed): {e}")
-            logger.warning("API will run without real-time Kafka ingestion.")
-            return
+            logger.error(f"aiokafka not installed: {e}. Running without Kafka ingestion.")
+            return False
 
         self.consumer = AIOKafkaConsumer(
             self.topic,
             bootstrap_servers=self.bootstrap_servers,
             group_id=self.group_id,
-            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-            request_timeout_ms=5000  # Fail fast
+            auto_offset_reset="earliest",
+            enable_auto_commit=False,
+            request_timeout_ms=5000,
         )
-        
+
         try:
             await self.consumer.start()
-            self._running = True
-            logger.info(f"--- Kafka Consumer Connected (Topic: {self.topic}) ---")
         except Exception as e:
-            logger.error(f"Failed to connect to Kafka at {self.bootstrap_servers}: {e}")
-            logger.warning("API will run without real-time Kafka ingestion.")
+            logger.error(f"Cannot reach Kafka at {self.bootstrap_servers}: {e}")
+            self.consumer = None
+            return False
+
+        self._running = True
+        logger.info(f"Kafka consumer connected (topic={self.topic})")
+        return True
+
+    async def run(self):
+        """Consume loop. Run as a background task: asyncio.create_task(c.run())"""
+        from aiokafka import ConsumerStoppedError
+
+        if not self._running:
             return
 
         try:
-            async for msg in self.consumer:
-                if not self._running:
-                    break
-                
-                raw_log = msg.value
-                # logger.info(f"Received log from {raw_log.get('source', 'unknown')}")
-                
-                # 1. Redact PII
-                clean_log = self.redactor.redact_log(raw_log)
-                
-                # 2. Hand over to the rest of the system
-                if on_message_callback:
-                    if asyncio.iscoroutinefunction(on_message_callback):
-                        await on_message_callback(clean_log)
-                    else:
-                        on_message_callback(clean_log)
-                else:
-                    logger.info(f"Redacted Log: {clean_log}")
-                    
+            while self._running:
+                polled = await self.consumer.getmany(timeout_ms=1000, max_records=self.max_batch)
+                if not polled:
+                    continue
+                logs: List[Dict[str, Any]] = []
+                for tp, messages in polled.items():
+                    for msg in messages:
+                        value = _decode(msg.value)
+                        if value is None:
+                            logger.warning(f"Skipping non-JSON-object message at {tp.partition}:{msg.offset}")
+                            continue
+                        logs.append(value)
+                if logs:
+                    try:
+                        await self.on_batch(logs)
+                    except Exception as e:
+                        # Rewind so the same batch is retried; nothing is committed past it.
+                        logger.error(f"Error ingesting batch of {len(logs)} logs: {e}")
+                        for tp, messages in polled.items():
+                            self.consumer.seek(tp, messages[0].offset)
+                        await asyncio.sleep(5)
+                        continue
+                await self.consumer.commit()
+        except ConsumerStoppedError:
+            logger.info("Consumer stopped cleanly.")
+        except asyncio.CancelledError:
+            logger.info("Consumer task cancelled.")
+            raise
         except Exception as e:
-            logger.error(f"Error in Kafka consumer loop: {e}")
+            logger.error(f"Fatal consumer loop error: {e}")
         finally:
             await self.stop()
 
     async def stop(self):
-        """Stops the Kafka consumer."""
         self._running = False
         if self.consumer:
             await self.consumer.stop()
-            logger.info("--- Kafka Consumer Stopped ---")
-
-if __name__ == "__main__":
-    # Test runner (Requires a running Kafka broker)
-    consumer = LogConsumer()
-    try:
-        asyncio.run(consumer.start())
-    except KeyboardInterrupt:
-        pass
+            self.consumer = None
+            logger.info("Kafka consumer stopped.")

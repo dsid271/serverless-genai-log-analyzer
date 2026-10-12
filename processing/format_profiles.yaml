@@ -1,0 +1,77 @@
+# processing/format_profiles.yaml
+#
+# Log-format profiles: map a platform's own field names onto the internal
+# schema (timestamp, severity, source, message) BEFORE redaction, storage and
+# detection. PII redaction rules live separately in pii_profiles.yaml.
+#
+# Per profile:
+#   fields:           canonical field -> candidate paths, first non-empty wins.
+#                     Paths use dots for nesting ("resource.service.name").
+#   severity_map:     source level (case-insensitive string or number) -> one of
+#                     DEBUG / INFO / WARNING / ERROR / CRITICAL.
+#   timestamp_formats: extra strptime formats tried after the built-ins
+#                     (ISO 8601 and epoch seconds / ms / us / ns).
+#   defaults:         values used when no candidate path matches.
+#
+# Platform names below are fictional examples. Copy one and edit the paths to
+# onboard a real platform; no code change is needed.
+version: 1
+
+_levels: &levels
+  TRACE: DEBUG
+  DEBUG: DEBUG
+  INFO: INFO
+  NOTICE: INFO
+  WARN: WARNING
+  WARNING: WARNING
+  ERR: ERROR
+  ERROR: ERROR
+  SEVERE: ERROR
+  CRIT: CRITICAL
+  CRITICAL: CRITICAL
+  FATAL: CRITICAL
+  EMERG: CRITICAL
+  ALERT: CRITICAL
+
+profiles:
+
+  # Records already using the internal field names (default).
+  generic:
+    fields:
+      timestamp: [timestamp, "@timestamp", ts, time, event_time]
+      severity: [severity, level, log_level, loglevel, levelname]
+      source: [source, service, service_name, app, application]
+      message: [message, msg, log, body]
+    severity_map: *levels
+
+  # SIEM HTTP-collector style envelope: epoch `time`, payload under `event`.
+  siem_hec:
+    fields:
+      timestamp: [time]
+      severity: [event.level, event.severity, event.log_level, fields.level]
+      source: [event.service, fields.service, sourcetype, source]
+      message: [event.message, event.msg, event]
+    severity_map: *levels
+
+  # Fictional "Acme Insight" analytics platform: underscore-prefixed fields.
+  acme_insight:
+    fields:
+      timestamp: [_time, event_ts]
+      severity: [log_level, lvl]
+      source: [svc, component, host]
+      message: [msg, text]
+    severity_map: *levels
+    timestamp_formats: ["%Y-%m-%d %H:%M:%S,%f", "%d/%b/%Y:%H:%M:%S %z"]
+
+  # Fictional "Acme AI Platform": OpenTelemetry-style log records.
+  # Numeric severities (severityNumber) use the OTel scale automatically:
+  # 1-4 trace, 5-8 debug, 9-12 info, 13-16 warn, 17-20 error, 21-24 fatal.
+  acme_ai_platform:
+    fields:
+      timestamp: [timeUnixNano, observedTimeUnixNano, timestamp]
+      severity: [severityText, severityNumber]
+      source: [resource.attributes.service.name, resource.service.name, service.name]
+      message: [body, body.message]
+    severity_map: *levels
+    defaults:
+      severity: INFO

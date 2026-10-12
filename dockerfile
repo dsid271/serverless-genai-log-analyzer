@@ -5,13 +5,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-ARG MODULE_SET=full
-
 COPY requirements /app/requirements
 
 RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip install --no-cache-dir -r /app/requirements/${MODULE_SET}.txt \
-    && if [ "${MODULE_SET}" = "full" ]; then python -m spacy download en_core_web_sm; fi
+    && python -m pip install --no-cache-dir -r /app/requirements/full.txt \
+    && (python -m spacy download en_core_web_sm || true)
 
 COPY . /app
 

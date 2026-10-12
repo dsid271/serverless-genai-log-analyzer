@@ -15,6 +15,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from api.audit import audit_logger
+from api.metrics import record_request
 
 # Context var for correlating logs across async tasks
 request_id_var: ContextVar[str] = ContextVar("request_id", default="")
@@ -67,10 +68,15 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
             
             logger.info("request_finished", status_code=status_code, duration_ms=duration_ms)
 
-            # Fire off to Delta Lake audit trail (non-blocking if we could use BackgroundTasks, 
-            # but doing it here directly for simplicity, Delta Lake append is fast enough for MVP)
-            # In production, offload this to a queue.
-            audit_logger.log_event(
+            record_request(
+                method=request.method,
+                path=request.url.path,
+                status_code=status_code,
+                duration_seconds=duration,
+            )
+
+            # Queued; a background thread commits audit events to Delta Lake in batches.
+            audit_logger.enqueue(
                 request_id=request_id,
                 user=user_identity,
                 action=f"{request.method} {request.url.path}",

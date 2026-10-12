@@ -1,0 +1,7 @@
+{
+  "logs": [
+    {"timestamp": "2026-09-09T10:00:01Z", "severity": "ERROR", "source": "rtr-lab-edge-01", "message": "BGP neighbor 10.0.12.9 Down - hold time expired", "error_code": "BGP_ADJCHANGE", "request_id": "req-demo-01"},
+    {"timestamp": "2026-09-09T10:00:02Z", "severity": "ERROR", "source": "rtr-lab-edge-01", "message": "Tunnel0 down, peer unreachable, notified noc.oncall@example.com", "error_code": "LINK_DOWN", "request_id": "req-demo-02"},
+    {"timestamp": "2026-09-09T10:00:03Z", "severity": "CRITICAL", "source": "sw-lab-access-02", "message": "Config push failed, rollback initiated by jane.doe@example.com", "error_code": "CFG_ROLLBACK", "request_id": "req-demo-03"}
+  ]
+}

@@ -1,0 +1,5 @@
+# Optional: Prometheus metrics endpoint (GET /metrics).
+# Install with: pip install -r requirements/full.txt -r requirements/observability.txt
+# (or: uv sync --extra observability)
+# Fully local/free — pairs with the Prometheus + Grafana services in docker-compose.yml.
+prometheus-client>=0.26.0
