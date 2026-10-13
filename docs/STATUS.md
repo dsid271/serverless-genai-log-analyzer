@@ -36,7 +36,19 @@ Overwrite this file as things change; don't append. Why-decisions go in `DECISIO
   - Not checked: ticket creation (needs a ServiceNow/PagerDuty/webhook sink).
   - The five Compose services are left running.
 - **ServiceNow + LLM check:** not run. There is no ServiceNow image or service in Docker or `docker-compose.yml`, so it needs a real instance (for example a free ServiceNow developer instance) and `SERVICENOW_INSTANCE`, `SERVICENOW_USER`, `SERVICENOW_PASSWORD`. The README says ticketing is only unit-tested with fakes.
-- **Findings A1, A3, E3, E5, F4, F5, G4, G5:** the original list is not in the repo. Follow-up work (demo.sh `API_KEY`, egress note, learned-entity approval) is done; the findings themselves are not re-verified.
+- **Findings A1, A3, E3, E5, F4, F5, G4, G5:** checked in an earlier session (the one that produced commits `dd2f5fe` and `25f015f`); results recorded here, not re-run.
+
+  | Finding | Result |
+  |---|---|
+  | A1 cooldown 0 in running container | Confirmed; fixed by recreating the container (now 60) |
+  | A3 count pinned to threshold | Refuted: no `clear()`, window trimmed with `popleft()` (`error_spike.py` ~77) |
+  | E3 sync `.invoke()` in async | Refuted: uses `asyncio.to_thread` |
+  | E5 silent `except: pass` | None found; `ip_intel.py:117` and `kafka_consumer.py:12` swallow errors without logging, **still to fix** |
+  | F4 `/analyze` up to 6 LLM calls | Confirmed, **open** |
+  | F5 LangSmith tracing on by default | Refuted: `.env.example` has `false` |
+  | G4 `contains_pii` from trigger only | Refuted: `any()` over the window (~96) |
+  | G5 99%+ precision claim | Confirmed; fixed in `COMPLIANCE.md` |
+- **Open decision: candidate replay on a new consumer group.** `LogConsumer` uses `auto_offset_reset="earliest"` (`ingestion/kafka_consumer.py:53`) for both connectors, so a new `CANDIDATES_GROUP_ID` replays the whole `incident-candidates` topic (298 old candidates on 2026-10-12). Options: `latest` for the candidates consumer only (simple; candidates published while the API is down with no committed offset are lost), or drop candidates older than N minutes in `CandidateHandler` (keeps short outages; needs a chosen N). Not decided.
 - **CI:** runs five test files, including `test_auth_rate_limit.py` (commit `7446b2e`). `test_format_profiles.py` and `test_ingest.py` exist but are not in CI.
 - **Task path mismatch:** deployment webhook is `POST /events/deployments` (task says `POST /deployments`); `GET /deployments` matches.
 - No tests for the Kafka connector, analyzers or the LLM path (per README).
@@ -45,4 +57,5 @@ Overwrite this file as things change; don't append. Why-decisions go in `DECISIO
 1. ~~Brand-new incident through the Spark path~~ Done (see above); `data/e2e_incidents.sqlite3` deleted.
 2. **Ticket creation, ServiceNow Personal Developer Instance only** (waiting for the PDI). Never use a Cisco ServiceNow instance. Put `SERVICENOW_INSTANCE`, `SERVICENOW_USER`, `SERVICENOW_PASSWORD` in `.env` (gitignored) or the shell, never in the repo, `docker-compose.yml`, docs or commits. Test incidents only. Run with `gemini_triage` off unless the LLM check is the point.
 3. **Benchmark with the agreed method** (see `DECISIONS.md`): discard the first run, 5 identical runs, median and range. Record the Delta commit version at the start and end of each run to test the transaction-log hypothesis.
-4. Get the A1–G5 findings list and verify each.
+4. ~~A1–G5 findings check~~ Done (see table above). Still open from it: E5 (add logging at `ip_intel.py:117` and `kafka_consumer.py:12`) and F4 (`/analyze` up to 6 LLM calls).
+5. Decide candidate replay: `auto_offset_reset=latest` for the candidates consumer, or drop candidates older than N minutes.
