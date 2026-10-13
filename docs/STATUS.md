@@ -72,3 +72,5 @@ Overwrite this file as things change; don't append. Why-decisions go in `DECISIO
 3. ~~Benchmark with the agreed method~~ Run 2026-10-13 (see above); not a valid comparison because the producer rate varied. Before benchmarking again, make the input steady: use a `--rate` the host can hold (for example 800), and treat any run whose producer rate misses the target by more than 5% as invalid.
 4. ~~A1–G5 findings check~~ Done (see table above). Still open from it: E5 (add logging at `ip_intel.py:117` and `kafka_consumer.py:12`) and F4 (`/analyze` up to 6 LLM calls).
 5. Decide candidate replay: `auto_offset_reset=latest` for the candidates consumer, or drop candidates older than N minutes.
+6. **Per-batch fixed cost (unprofiled).** Batch time doesn't scale with row count. Candidates: Delta write, trigger interval, startup. Check `logs`-stage task time vs scheduling delay in the Spark UI, and rerun with a larger trigger interval. Benchmark only on a quiet host at a sustainable `--rate` (e.g. 800).
+
