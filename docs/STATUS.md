@@ -32,7 +32,8 @@ Overwrite this file as things change; don't append. Why-decisions go in `DECISIO
   - Backlog: the new consumer group read the 298 old candidates from the start of the topic and created 21 incidents (one per source, grouped within 900 s).
   - Fresh window 1 (`--rate 300 --duration 30`, default 5% errors): Spark published **no** candidates. This is correct: most sources have a baseline of 3–5 errors per window, so a spike needs about 11 in one 60 s window, and the ~14 errors per source were split across a minute boundary.
   - Fresh window 2 (`--error-ratio 0.5`): Spark published candidates (window `13:01:00Z`, 110–136 errors per source, `reason=baseline`, severity `high`). The API consumed them (group lag 0) and the 20 sources' incidents took one more occurrence each (sum 278 → 298); incident count stayed 21 because they were grouped into existing incidents. Run tag was present in the incident details.
-  - Not checked: a brand-new incident (no existing one within 900 s) through this path, and ticket creation (needs a ServiceNow/PagerDuty/webhook sink).
+  - Brand-new incidents (same day, empty `e2e_incidents.sqlite3`, same override; consumer group offsets kept so the old backlog was not replayed): `--rate 300 --duration 30 --error-ratio 0.5` created **20 new `error_spike` incidents**, one per source, each with `occurrences=1` and the run tag in its details; `tickets` stayed at 0 and the API log had no errors. The e2e DB was then deleted and the API restored to its normal config.
+  - Not checked: ticket creation (needs a ServiceNow/PagerDuty/webhook sink).
   - The five Compose services are left running.
 - **ServiceNow + LLM check:** not run. There is no ServiceNow image or service in Docker or `docker-compose.yml`, so it needs a real instance (for example a free ServiceNow developer instance) and `SERVICENOW_INSTANCE`, `SERVICENOW_USER`, `SERVICENOW_PASSWORD`. The README says ticketing is only unit-tested with fakes.
 - **Findings A1, A3, E3, E5, F4, F5, G4, G5:** the original list is not in the repo. Follow-up work (demo.sh `API_KEY`, egress note, learned-entity approval) is done; the findings themselves are not re-verified.
@@ -41,7 +42,7 @@ Overwrite this file as things change; don't append. Why-decisions go in `DECISIO
 - No tests for the Kafka connector, analyzers or the LLM path (per README).
 
 ## Next steps
-1. **Brand-new incident through the Spark path.** Rerun the `spark_candidates` check so a spike arrives for a source with no incident in the last 900 s (`INCIDENT_GROUP_WINDOW_SECONDS`), or against an empty incident DB, and confirm a new incident row is created. It uses the temporary override with `INCIDENTS_DB=/app/data/e2e_incidents.sqlite3`. **When done, delete `data/e2e_incidents.sqlite3`** (gitignored, test data only).
-2. **Ticket creation, ServiceNow Personal Developer Instance only.** Never use a Cisco ServiceNow instance. Put `SERVICENOW_INSTANCE`, `SERVICENOW_USER`, `SERVICENOW_PASSWORD` in `.env` (gitignored) or the shell, never in the repo, `docker-compose.yml`, docs or commits. Test incidents only. Run with `gemini_triage` off unless the LLM check is the point.
+1. ~~Brand-new incident through the Spark path~~ Done (see above); `data/e2e_incidents.sqlite3` deleted.
+2. **Ticket creation, ServiceNow Personal Developer Instance only** (waiting for the PDI). Never use a Cisco ServiceNow instance. Put `SERVICENOW_INSTANCE`, `SERVICENOW_USER`, `SERVICENOW_PASSWORD` in `.env` (gitignored) or the shell, never in the repo, `docker-compose.yml`, docs or commits. Test incidents only. Run with `gemini_triage` off unless the LLM check is the point.
 3. **Benchmark with the agreed method** (see `DECISIONS.md`): discard the first run, 5 identical runs, median and range. Record the Delta commit version at the start and end of each run to test the transaction-log hypothesis.
 4. Get the A1–G5 findings list and verify each.
