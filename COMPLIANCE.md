@@ -5,18 +5,23 @@ This checklist covers PCI-DSS (payment processing), GDPR (EU data privacy), SOC 
 
 Note: This repository currently ships an MVP FastAPI service with modular plugins. Items referencing Spark/Flink/large-scale pipelines are part of the planned scale-out architecture and are included here as forward-looking controls.
 
+How to read this file: `[x]` means the behaviour exists in the code and the line says what it actually does. `[ ]` means not implemented, or only partly. This is an engineering gap list, not evidence of PCI-DSS, GDPR or SOC 2 compliance. Those need organisational controls and an independent assessment (see section 7).
+
+Defaults that affect several items: authentication is **off** (`ENABLE_AUTH=false`, so every caller is an anonymous admin), storage is on local disk, and the NER half of PII redaction needs the spaCy model.
+
 ---
 
 ## 1. Data Classification & PII Management
 
 ### PII Detection & Redaction
-- [x] Identify PII types: credit cards, SSNs, passwords, emails, phone numbers
-- [x] Implement detection: regex + ML (Presidio, custom classifiers)
+- [x] Identify PII types: credit cards, SSNs, emails and sensitive keys (rules); names, locations, IPs and phone numbers (NER only, so not caught in rules-only mode)
+- [x] Implement detection: regex rules always on; Presidio NER optional. Each log records `redaction_mode` (`rules+ner` or `rules-only`)
 - [x] Redaction strategy:
-  - [x] Credit cards: `xxxx-xxxx-xxxx-1234` (last 4 visible)
-  - [x] SSNs: `xxx-xx-5678` (last 4 visible)
-  - [x] Passwords: **remove entirely**
-  - [x] Emails: `user***@domain.com`
+  - [x] Credit cards: Luhn-valid numbers masked, last 4 visible (`************1234`)
+  - [x] SSNs: fully masked as `***-**-****` (no digits kept)
+  - [x] Passwords, tokens, API keys, secrets: value replaced with `[REDACTED]` when it sits under a sensitive key such as `password`. A password written inside free text is not detected by the rules.
+  - [x] Emails: first character and domain kept (`u***@domain.com`)
+  - [x] Identifier keys (`customer_id`, `user_id`): replaced with a keyed-hash token `anon_<hash>`. Set `PII_PSEUDONYM_KEY`; the default key is not safe for real use.
 - [ ] Classification metadata: tag all logs (public / internal / confidential / PII)
 - [ ] Testing: precision and false-negative rate are not measured. The rule tier is reliable for emails, Luhn-valid card numbers and SSNs. NER over-triggers on syslog (for example `%BGP-5-ADJCHANGE`) and has not been evaluated on network logs. No labelled evaluation set exists yet.
 
@@ -72,7 +77,8 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
 
 ### Authentication (Authn)
 - [ ] **API users**: OAuth 2.0 (Google Identity) or SAML
-- [ ] **Service-to-service**: API keys (auto-rotated, scoped)
+- [x] **API keys**: issued per profile, scoped, with an expiry (30 to 365 days by profile) and revocable. Enforced only when `ENABLE_AUTH=true`.
+- [ ] **Service-to-service**: API keys with automatic rotation (keys expire but are not rotated automatically)
 - [ ] **Multi-factor authentication (MFA)**: required for admins
 - [ ] **Session management**: JWT tokens, max 8-hour lifetime
 - [ ] **Password policy** (if applicable):
@@ -80,14 +86,14 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
   - [ ] Complexity: uppercase, lowercase, numbers, symbols
   - [ ] No reuse of last 5 passwords
   - [ ] Expiration: 90 days (or passwordless preferred)
-- [ ] **Credential storage**: hashed (bcrypt, argon2), never plain-text
+- [x] **Credential storage**: API keys are stored only as SHA-256 hashes of a random secret and compared in constant time. There are no user passwords.
 - [ ] Testing: OWASP top 10 authn tests
 
 ### Authorization (Authz) & RBAC
-- [x] **Roles defined**: admin, analyst, viewer (+ custom roles)
-- [x] **Admin**: full access, user/role management, config changes
-- [x] **Analyst**: search, analyze, cannot delete or export raw data
-- [x] **Viewer**: read-only, pre-computed reports only
+- [x] **Roles defined** as key profiles: admin, analyst, viewer, plus `ingest-service` and `deploy-webhook`. Each profile maps to scopes checked per endpoint. Enforced only when `ENABLE_AUTH=true`.
+- [x] **Admin**: all scopes, including key issue/revoke (`keys:admin`), PII rule review (`pii:admin`) and audit read (`audit:read`)
+- [x] **Analyst**: ingest, search, analyze, read incidents, give feedback, edit the knowledge base. No audit or key admin. No export endpoint exists. Can delete knowledge documents (not logs).
+- [x] **Viewer**: read-only incidents, summary and plugins
 - [ ] **Field-level access**: PII fields hidden from non-admin
 - [ ] **Data-level access**: restrict by department, region, etc.
 - [ ] **Audit trail**: log all permission changes
@@ -106,14 +112,15 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
 ## 4. Audit Logging & Accountability
 
 ### Query Audit Trail
-- [x] **Every search logged**: user, timestamp, query, results count
-- [x] **Every analysis logged**: user, timestamp, prompt, LLM response
-- [ ] **Every export logged**: user, timestamp, fields, row count
-- [x] **Data access**: all reads logged (not just modifications)
-- [ ] **Sensitive operations**: user deletions, role changes, key rotations
-- [x] **Storage**: immutable, append-only (Delta Lake)
+- [x] **Every request logged** (middleware, all routes): key identity, timestamp, method and path, query string, status code, duration, request ID
+- [ ] **Every search logged**: query text and results count. `/search` sends its query in the POST body, which is not recorded, and `results_count` is only set by `/ingest`.
+- [ ] **Every analysis logged**: prompt and LLM response (only the request metadata is recorded today)
+- [ ] **Every export logged**: user, timestamp, fields, row count (no export endpoint exists)
+- [x] **Data access**: reads are logged at request level (who called which endpoint), not per row
+- [ ] **Sensitive operations**: user deletions, role changes, key rotations (key issue and revoke are logged only as ordinary requests)
+- [ ] **Storage**: immutable, append-only. Events are appended to a local Delta Lake table, but nothing prevents edits or deletion, and a failed write is logged and dropped.
 - [ ] **Retention**: 7 years minimum
-- [x] **Searchability**: query audit logs via API (with RBAC)
+- [x] **Searchability**: `GET /audit-trail` (needs `audit:read`), filter by user, limit
 
 ### Configuration Change Audit
 - [ ] **Infrastructure changes**: terraform plan/apply logged
@@ -126,7 +133,8 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
 ### Data Access Audit
 - [ ] **Who accessed what**: user, timestamp, data, duration
 - [ ] **Bulk exports**: flagged for review (unusual patterns)
-- [x] **PII access**: logged separately, reviewed regularly
+- [x] **PII flag**: `/ingest` audit events record `contains_pii`
+- [ ] **PII access**: logged separately and reviewed regularly (no separate log, no review process)
 - [ ] **Alerts**: trigger on suspicious patterns (e.g., exporting >10K records)
 
 ### Audit Log Integrity
@@ -150,8 +158,8 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
 - [ ] **VPC Flow Logs**: monitor network traffic
 
 ### API Security
-- [x] **Rate limiting**: 100 req/min per user (configurable)
-- [x] **Input validation**: all query parameters validated (SQL injection prevention)
+- [x] **Rate limiting**: per API key (or client IP when there is no key). Defaults: 100/min general, 50/min ingest, 10/min analyze. Set with `RATE_LIMIT_DEFAULT`, `RATE_LIMIT_INGEST`, `RATE_LIMIT_ANALYZE`.
+- [x] **Input validation**: Pydantic request models and typed parameters. No dedicated injection testing has been done.
 - [ ] **CORS**: whitelist trusted origins
 - [ ] **CSRF protection**: token-based (if applicable)
 - [ ] **Timeout**: max query timeout 30 seconds (prevent resource exhaustion)
@@ -312,8 +320,8 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
 ### Critical (Week 1–4)
 - [x] PII detection & redaction (rules for emails, Luhn cards and SSNs; NER over-triggers on syslog; precision not measured on network logs)
 - [ ] Encryption in transit (TLS 1.3) & at rest (KMS)
-- [x] RBAC (admin, analyst, viewer)
-- [x] Audit logging (all queries, data access)
+- [x] RBAC (admin, analyst, viewer; enforced only when `ENABLE_AUTH=true`)
+- [ ] Audit logging (partial: request metadata for every route; search/analysis content, immutability and retention missing)
 - [ ] Network security (private VPC, firewall rules)
 
 ### High (Week 5–12)
@@ -331,4 +339,4 @@ Note: This repository currently ships an MVP FastAPI service with modular plugin
 
 ---
 
-*Last Updated: 2026-06-09*
+*Last Updated: 2026-10-19*
