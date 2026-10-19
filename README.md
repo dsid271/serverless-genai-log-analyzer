@@ -178,15 +178,16 @@ uv run python scripts/manage_keys.py revoke <key_id>
 
 ## Docker (Plug-and-Play)
 
-This project can be built as a single container image that you can run locally. The image is compatible with serverless platforms such as Cloud Run, but this repo does not deploy it anywhere.
+This project builds one container image per component (API and Spark job) from a single multi-stage `dockerfile`, and you can run them locally. The image is compatible with serverless platforms such as Cloud Run, but this repo does not deploy it anywhere.
 
 ### Build
 
 ```powershell
-docker build -t genai-log-analyzer .
+docker build --target api   -t genai-log-analyzer .         # API (also the default for a plain `docker build .`)
+docker build --target spark -t genai-log-analyzer-spark .   # Spark Structured Streaming job
 ```
 
-The image installs `requirements/full.txt`. There is no reduced image, because the API does not start without the redactor, Delta Lake, and Chroma.
+`dockerfile` is multi-stage with one target per component. Dependencies are installed into a virtualenv in a builder stage, and the runtime stage copies only that venv. The `api` image installs `requirements/full.txt` and has no Java. The `spark` image installs `requirements/spark.txt` plus Java 21, and has no spaCy or Chroma. Compose picks the target for each service. There is no reduced API image, because the API does not start without the redactor, Delta Lake, and Chroma.
 
 ### Runtime modularity (env vars)
 
@@ -418,7 +419,7 @@ For sustained high volume (thousands of events per second), `spark/streaming_job
 docker compose --profile kafka --profile spark up -d kafka spark api
 ```
 
-- **Runtime**: one container (`Dockerfile.spark`, Java 21, `local[*]`). The Kafka and Delta jars download on first start and are cached in the `spark-ivy` volume. The Spark UI is on http://localhost:4040.
+- **Runtime**: one container (the `spark` target of `dockerfile`, Java 21, `local[*]`). The Kafka and Delta jars download on first start and are cached in the `spark-ivy` volume. The Spark UI is on http://localhost:4040.
 - **Shared state**: the container reads `.env` and `./data/learned_pii.sqlite3`. `PII_PSEUDONYM_KEY` must match the api so learned entities apply. Approved PII rule suggestions in the same file apply too.
 - **Delta tables**: in Compose, Spark writes `/spark-data/delta-lake/logs_stream` and its checkpoints in the `spark-data` volume, not in `./data`. Each batch writes many small files, which is slow on a host bind mount (measured on a OneDrive folder: ~150 s lag vs ~50 s in a volume). This table is separate from the api's `data/delta-lake/logs`.
 - **Other settings**: `SPARK_TRIGGER` (`10 seconds`), `SPARK_MAX_OFFSETS_PER_TRIGGER` (200000), `SPARK_KAFKA_MIN_PARTITIONS` (number of cores), `SPARK_STARTING_OFFSETS` (`latest`), `SPARK_FORMAT_PROFILE`, `SPARK_CHECKPOINT_DIR`, `SPARK_SPIKE_OUTPUT_MODE` (`update` = alert as soon as a window crosses the threshold; `append` = once, after the watermark passes).

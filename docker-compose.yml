@@ -1,6 +1,9 @@
 services:
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: dockerfile
+      target: api
     ports:
       - "8000:8000"
     env_file:
@@ -75,7 +78,8 @@ services:
   spark:
     build:
       context: .
-      dockerfile: Dockerfile.spark
+      dockerfile: dockerfile
+      target: spark
     profiles: ["spark"]
     env_file:
       - .env
