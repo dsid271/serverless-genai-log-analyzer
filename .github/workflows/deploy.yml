@@ -61,5 +61,6 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          target: api
           push: true
           tags: ghcr.io/${{ github.repository }}:${{ env.IMAGE_NAME }}

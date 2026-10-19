@@ -1,4 +1,4 @@
-# Spark Structured Streaming job (spark/streaming_job.py), installed by Dockerfile.spark.
+# Spark Structured Streaming job (spark/streaming_job.py), installed by the `spark` target of dockerfile.
 # Requires Java 17+. Kafka and Delta jars are fetched at startup (spark.jars.packages).
 # Rules-only redaction: presidio-anonymizer is needed, spaCy/presidio-analyzer are not.
 pyspark>=4.0.0,<4.1

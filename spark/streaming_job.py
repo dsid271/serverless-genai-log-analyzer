@@ -7,7 +7,7 @@
        (incident-candidates)                                                 (query "spikes")
 
 The API consumes incident-candidates with the `spark_candidates` connector.
-Run: python -m spark.streaming_job   (needs Java 17+; see Dockerfile.spark)
+Run: python -m spark.streaming_job   (needs Java 17+; see the `spark` target of dockerfile)
 """
 from __future__ import annotations
 
