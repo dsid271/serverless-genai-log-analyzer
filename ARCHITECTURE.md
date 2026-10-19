@@ -4,7 +4,9 @@
 
 ## Implementation Status
 
-This document describes the target architecture. **The current repository implements a fully-functional MVP** (FastAPI + modular plugins + optional Kafka connector + proactive detectors + incident analyzers + RBAC + Audit Logging). The **Spark/Flink streaming layer, managed infrastructure, and observability dashboards are planned scale-out steps** and are not implemented in this codebase yet.
+This document describes the target architecture. **The current repository implements a fully-functional MVP** (FastAPI + modular plugins + optional Kafka connector + proactive detectors + incident analyzers + RBAC + Audit Logging), an opt-in **local Spark Structured Streaming job** (single container, `local[*]`), and a local Prometheus + Grafana stack. The **cluster-scale Spark/Flink deployment, managed infrastructure, and cloud observability (LangSmith, Cloud Logging, Kibana) are planned scale-out steps** and are not implemented in this codebase yet.
+
+**Container images:** a single multi-stage `dockerfile` builds one image per component: the `api` target (FastAPI, spaCy, Chroma; no Java) and the `spark` target (PySpark and Java 21; no spaCy or Chroma). Docker Compose runs each as its own container.
 
 ## Table of Contents
 - [System Diagram](#system-diagram)
@@ -122,7 +124,7 @@ flowchart TD
 
 ### 3. **Stream Processing (PySpark / Flink)** `[PARTIAL — local Spark job]`
 
-**Implemented today**: `spark/streaming_job.py` runs in one Docker container (`local[*]`, Compose profile `spark`). It reads `logs-raw`, applies format profiles, rule-tier redaction (with learned entities and approved PII rule suggestions) and message patterns, writes Delta Lake partitioned by `date`/`source`, and publishes windowed per-source error spikes to `incident-candidates`. The API's `spark_candidates` connector turns those into incidents. It has been run end-to-end locally; it has not been load-tested or deployed to a cluster. The rest of this section is the target design.
+**Implemented today**: `spark/streaming_job.py` runs in one Docker container (`local[*]`, Compose profile `spark`, built from the `spark` target of `dockerfile`). It reads `logs-raw`, applies format profiles, rule-tier redaction (with learned entities and approved PII rule suggestions) and message patterns, writes Delta Lake partitioned by `date`/`source`, and publishes windowed per-source error spikes to `incident-candidates`. The API's `spark_candidates` connector turns those into incidents. It has been run end-to-end locally; it has not been load-tested or deployed to a cluster. The rest of this section is the target design.
 
 **Purpose**: 
 - Parse, enrich, filter, and aggregate logs in real time
@@ -599,7 +601,7 @@ curl -X GET 'https://api.genai-logs.example.com/audit-trail?user=analyst-01&date
 
 **Deployment**:
 - **Cloud Run**: Auto-scales 0–100 instances (planned)
-- **Container**: Python 3.12 + FastAPI + Uvicorn
+- **Container**: Python 3.12 + FastAPI + Uvicorn (the `api` target of the multi-stage `dockerfile`)
 - **Latency SLA**: <2s P95 for search, <5s P95 for analysis
 
 **Monitoring**:
