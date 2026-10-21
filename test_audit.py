@@ -1,7 +1,35 @@
+import os
+
 import pandas as pd
 from deltalake import DeltaTable, write_deltalake
 
+import api.audit as audit_module
 from api.audit import AuditLogger
+
+
+def test_audit_logger_persists_detail(tmp_path):
+    table = str(tmp_path / "audit_trail")
+    AuditLogger(table).log_event(request_id="r1", user="u", action="POST /search", detail="query=disk full limit=5")
+    assert DeltaTable(table).to_pandas().iloc[0]["detail"] == "query=disk full limit=5"
+
+
+def test_failed_write_is_spooled_then_replayed(tmp_path, monkeypatch):
+    table = str(tmp_path / "audit_trail")
+    logger = AuditLogger(table)
+    real_write = audit_module.write_deltalake
+
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(audit_module, "write_deltalake", broken)
+    logger.log_event(request_id="req-1", user="u", action="GET /a")
+    assert not os.path.exists(table)
+    assert os.path.exists(logger.spool_path)
+
+    monkeypatch.setattr(audit_module, "write_deltalake", real_write)
+    logger.log_event(request_id="req-2", user="u", action="GET /b")
+    assert sorted(DeltaTable(table).to_pandas()["request_id"]) == ["req-1", "req-2"]
+    assert not os.path.exists(logger.spool_path)
 
 
 def test_audit_logger_pii_contains_persisted(tmp_path):

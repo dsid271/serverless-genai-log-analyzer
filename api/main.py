@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request, Depends, Response, HTTPException
 from api.orchestrator import SystemOrchestrator
 from pydantic import BaseModel, Field
 from typing import Literal, List, Dict, Any, Optional
+import json
 import os
 import time
 import logging
@@ -22,7 +23,7 @@ import structlog
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
-from api.auth import require_scope, User
+from api.auth import require_scope, User, _auth_enabled
 from api.key_store import PROFILES, get_key_store
 from api.rate_limit import limiter, rate_limit_default, rate_limit_ingest, rate_limit_analyze
 from api.middleware import AuditLoggingMiddleware
@@ -51,6 +52,22 @@ def _env_csv(name: str) -> list[str]:
     val = os.getenv(name, "")
     parts = [p.strip() for p in val.split(",")]
     return [p for p in parts if p]
+
+_AUDIT_TEXT_MAX = 500
+
+def _audit_text(text: Any) -> str:
+    """Redacted, truncated copy of free text for the audit trail.
+
+    Search queries and prompts can contain PII, so the rule tier (cards, SSNs, emails, approved
+    learned entities) is applied first. NER is skipped on purpose: `redact_text` would feed
+    these strings into the learned-entity store, which is meant for ingested logs only.
+    """
+    try:
+        redacted, _ = orchestrator.enricher.redactor.rules.apply(str(text or ""))
+    except Exception:
+        logger.exception("audit redaction failed; text omitted from the audit event")
+        return "[OMITTED: redaction failed]"
+    return redacted[:_AUDIT_TEXT_MAX]
 
 def _build_orchestrator(event_bus: Optional[object] = None) -> SystemOrchestrator:
     gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -201,6 +218,12 @@ async def lifespan(app: FastAPI):
     
     global _running_connectors, _running_detectors, _analyzer_runner
 
+    if not _auth_enabled():
+        logger.warning(
+            "AUTH IS OFF: ENABLE_AUTH is not true, so every caller is an anonymous admin. "
+            "Set ENABLE_AUTH=true and issue keys with scripts/manage_keys.py before exposing this API."
+        )
+
     if ticket_dispatcher is not None:
         ticket_dispatcher.start()
 
@@ -324,7 +347,13 @@ async def analyze_logs(request: Request, body: AnalysisRequest, user: User = Dep
     """Run agentic RAG analysis on the log store."""
     if orchestrator.engine is None:
         raise HTTPException(status_code=503, detail="Analysis unavailable: GEMINI_API_KEY is not configured.")
-    return await orchestrator.analyze_query(body.query)
+    prompt = _audit_text(body.query)
+    request.state.audit_detail = f"prompt={prompt}"  # kept even if the analysis fails
+    result = await orchestrator.analyze_query(body.query)
+    if isinstance(result, dict):
+        request.state.results_count = len(result.get("documents") or [])
+        request.state.audit_detail = f"prompt={prompt} | response={_audit_text(result.get('generation'))}"
+    return result
 
 @app.get("/metrics", tags=["Observability"], include_in_schema=False)
 async def metrics():
@@ -504,7 +533,12 @@ class SearchRequest(BaseModel):
 @app.post("/search", tags=["Search"])
 @limiter.limit(rate_limit_default)
 async def search_logs(request: Request, body: SearchRequest, user: User = Depends(require_scope("logs:search"))):
+    detail = f"query={_audit_text(body.query)} limit={body.limit}"
+    if body.filters:
+        detail += f" filters={_audit_text(json.dumps(body.filters, default=str, sort_keys=True))}"
+    request.state.audit_detail = detail
     results = orchestrator.search(body.query, body.limit, body.filters)
+    request.state.results_count = len(results)
     return {"results": results, "count": len(results)}
 
 @app.get("/summary", tags=["Summary"])

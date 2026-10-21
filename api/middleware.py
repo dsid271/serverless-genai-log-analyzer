@@ -87,6 +87,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                 duration_ms=duration_ms,
                 status_code=status_code,
                 error=error_msg,
+                detail=getattr(request.state, "audit_detail", ""),
             )
 
         return response
