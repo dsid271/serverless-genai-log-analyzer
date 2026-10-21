@@ -71,7 +71,7 @@ def test_api_ingest_search_summary_audit(monkeypatch):
         assert client.delete(f"/knowledge/{pm_id}").status_code == 200
         assert client.get("/incidents/inc-missing").status_code == 404
 
-        search_payload = {"query": "endpoint coverage", "limit": 1}
+        search_payload = {"query": "endpoint coverage for jane.roe@example.com", "limit": 1}
         search_response = client.post("/search", json=search_payload)
         assert search_response.status_code == 200, search_response.text
         search_json = search_response.json()
@@ -91,6 +91,11 @@ def test_api_ingest_search_summary_audit(monkeypatch):
             for event in events
         )
 
+        # /search records what was asked (redacted) and how many results came back.
+        search_events = [e for e in events if e.get("action") == "POST /search" and "endpoint coverage" in (e.get("detail") or "")]
+        assert search_events, "POST /search content missing from the audit trail"
+        assert "jane.roe@example.com" not in search_events[0]["detail"]
+        assert search_events[0]["results_count"] == search_json["count"]
 
         summary = summary_response.json()["hourly_summaries"]
         bucket = next(b for b in summary if b["hour"] == "2026-08-01T12:00:00Z")
