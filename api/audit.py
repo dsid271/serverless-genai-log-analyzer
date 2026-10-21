@@ -167,9 +167,13 @@ class AuditLogger:
                 df = df[df["user"] == user_filter]
                 
             # Sort by timestamp descending
-            df = df.sort_values("timestamp", ascending=False)
-            
-            return df.head(limit).to_dict(orient="records")
+            df = df.sort_values("timestamp", ascending=False).head(limit)
+
+            # Rows written before a column existed come back as NaN in numeric columns,
+            # which is not valid JSON (the endpoint would 500). Return null instead.
+            df = df.astype(object).where(df.notna(), None)
+
+            return df.to_dict(orient="records")
             
         except Exception as e:
             logger.error(f"Failed to query audit logs: {e}")
