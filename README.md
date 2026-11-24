@@ -4,7 +4,7 @@
 
 This project is a local-first prototype of a **Generative AI-powered Network Log Analyzer**: it ingests logs, redacts PII, stores them, raises incidents on error spikes, and (optionally) uses an LLM to summarize and triage those incidents. It works end to end, but it is a prototype, not a production system. See [Known Limitations](#known-limitations).
 
-A **FastAPI** backend orchestrates the **Gemini API** via **LangChain/LangGraph**. The app is containerized with **Docker**, and the image is compatible with serverless platforms such as **Google Cloud Run**. No live deployment is maintained, and Cloud Run deployment is not automated.
+A **FastAPI** backend orchestrates the **Gemini API** via **LangChain/LangGraph**. The app is containerized with **Docker**, and the image runs on serverless platforms such as **Google Cloud Run**. "Serverless" here describes the container, not the data: the API keeps its state (SQLite, Delta Lake, Chroma) on local disk, so it is designed to run self-hosted with mounted volumes (`./data` and the `spark-data` volume in `docker-compose.yml`). A truly stateless serverless deployment would need object storage and a managed database, which this project does not implement. No live deployment is maintained, and Cloud Run deployment is not automated.
 
 **Continuous Integration** runs on **GitHub Actions**: on every push to `main` it runs `ruff`, a `py_compile` import check on `api/main.py`, and the pytest suite (see [Testing](#testing)), then builds and publishes a Docker image to the GitHub Container Registry (GHCR). There is no Continuous Deployment.
 
@@ -39,7 +39,7 @@ On-call engineers face thousands of near-identical log lines that often contain 
 - **No remediation**: no automated actions.
 - **Enrichment is limited**: GeoIP country and AbuseIPDB reputation only. There is no CMDB lookup. AbuseIPDB's free tier (1,000 checks/day) caps how many new IPs are checked.
 - **PII redaction quality is not measured**: there is no evaluation set. Without the spaCy model it runs in rules-only mode and will not catch names.
-- **Storage is local disk** (`./data/delta-lake`, `./data/chroma`), so it is ephemeral on serverless platforms.
+- **Storage is local disk** (`./data/delta-lake`, `./data/chroma`, SQLite files under `./data`). This is deliberate, to keep the project free to run (see the Abstract). It survives restarts when `./data` is a mounted volume, but is lost on serverless platforms that give containers ephemeral disk. Back up `./data` yourself (for example `rclone sync`; use SQLite's `.backup` or Litestream for the `.sqlite3` files, not a plain copy).
 - **Auth is off by default** (`ENABLE_AUTH=false`).
 - **Verified end to end (local, 2026-10-12)**: Kafka → Spark → API → incident through the `spark_candidates` connector, and the Prometheus/Grafana stack, with ticket dispatch off. **Not verified**: PagerDuty and webhook ticketing (tested with fakes only; ServiceNow ticket creation was tested live) and the API's own `kafka` log connector under load.
 - **No fallbacks**: if the redactor, Delta Lake, or Chroma cannot start, the API refuses to start. Without `GEMINI_API_KEY`, `POST /analyze` returns 503.
