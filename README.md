@@ -16,7 +16,7 @@ On-call engineers face thousands of near-identical log lines that often contain 
 
 ## Implemented Now (MVP)
 
-- **FastAPI API** with `GET /`, `POST /ingest`, `POST /analyze`, `GET /plugins`, `GET /incidents`, `GET /incidents/{id}`, `POST /incidents/{id}/feedback`, `GET /feedback`, `POST /events/deployments`, `GET /deployments`, `POST|GET /knowledge`, `DELETE /knowledge/{id}`, `POST /search`, `GET /summary`, `GET /audit-trail`, `GET /metrics`, `GET /admin/integrations`
+- **FastAPI API** with `GET /`, `POST /ingest`, `POST /analyze`, `GET /plugins`, `GET /incidents`, `GET /incidents/{id}`, `POST /incidents/{id}/feedback`, `GET /feedback`, `POST /events/deployments`, `GET /deployments`, `POST|GET /knowledge`, `DELETE /knowledge/{id}`, `POST /search`, `POST /query`, `GET /summary`, `GET /audit-trail`, `GET /metrics`, `GET /admin/integrations`
 - **Modular plugin system** via `ENABLED_CONNECTORS`, `ENABLED_DETECTORS`, `ENABLED_ANALYZERS`
 - **Plugin loading** via `PLUGIN_MODULES` (derived-image friendly)
 - **Error-spike detection** (`error_spike`) that raises incidents into a **SQLite incident store** (`INCIDENTS_DB`), with analyzer outputs attached
@@ -31,17 +31,17 @@ On-call engineers face thousands of near-identical log lines that often contain 
 
 ## Known Limitations
 
-- **Detection is a static threshold**: one detector counts `ERROR`/`CRITICAL` logs in a sliding window. There is no learned baseline and no prediction. Grouping joins hits that share a source within `INCIDENT_GROUP_WINDOW_SECONDS`; it does not detect causal links between services.
+- **Detection is a static threshold**: one detector counts `ERROR`/`CRITICAL` logs in a sliding window. There is no learned baseline and no prediction. Grouping joins hits that share a source or a `trace_id` within `INCIDENT_GROUP_WINDOW_SECONDS`. Services whose errors carry no common trace id are not linked; there is no service dependency graph.
 - **Severity weights are hand-set**: the factors in `core/severity.py` are not fitted to historical data. Feedback is stored (`GET /feedback`) but nothing retrains on it yet; false positives only lower the score of later incidents on the same service.
-- **LLM triage is unverified**: there is no correctness measurement. Retrieved runbooks/postmortems are listed under `references` in each analysis, but the model's use of them is not checked.
+- **LLM triage eval is small**: `scripts/eval_triage.py` runs `gemini_triage` on the cases in `scripts/eval_triage_cases.yaml` and checks retrieval, that the answer cites the expected runbook and no other, severity and keywords. Five fictional cases, matched on titles and keywords; it is not a measure of accuracy on real incidents.
 - **Routing is a static file**: `config/ownership.yaml` is read at startup. There is no on-call schedule. PagerDuty and ServiceNow tickets are sent, but routing keys and assignment groups are mapped per team through env vars, not synced from those systems.
-- **Ticketing is not verified against live providers**: the dispatcher and webhook signing are unit-tested with fakes; no real PagerDuty or ServiceNow instance was called.
+- **Ticketing is partly verified against live providers**: ServiceNow ticket creation was tested against a developer instance. PagerDuty has not been called live; the dispatcher and webhook signing are unit-tested with fakes.
 - **No remediation**: no automated actions.
 - **Enrichment is limited**: GeoIP country and AbuseIPDB reputation only. There is no CMDB lookup. AbuseIPDB's free tier (1,000 checks/day) caps how many new IPs are checked.
 - **PII redaction quality is not measured**: there is no evaluation set. Without the spaCy model it runs in rules-only mode and will not catch names.
 - **Storage is local disk** (`./data/delta-lake`, `./data/chroma`), so it is ephemeral on serverless platforms.
 - **Auth is off by default** (`ENABLE_AUTH=false`).
-- **Verified end to end (local, 2026-10-12)**: Kafka → Spark → API → incident through the `spark_candidates` connector, and the Prometheus/Grafana stack, with ticket dispatch off. **Not verified**: ticketing (PagerDuty, ServiceNow and webhook are only tested with fakes) and the API's own `kafka` log connector under load.
+- **Verified end to end (local, 2026-10-12)**: Kafka → Spark → API → incident through the `spark_candidates` connector, and the Prometheus/Grafana stack, with ticket dispatch off. **Not verified**: PagerDuty and webhook ticketing (tested with fakes only; ServiceNow ticket creation was tested live) and the API's own `kafka` log connector under load.
 - **No fallbacks**: if the redactor, Delta Lake, or Chroma cannot start, the API refuses to start. Without `GEMINI_API_KEY`, `POST /analyze` returns 503.
 - **Test coverage is thin**: 84 tests cover the API, auth and rate limiting, key issuance, audit logger, redactor, error-spike detector, triage, ticket dispatch, webhook signing and IP enrichment. There are no tests for the Kafka connector, analyzers, or the LLM path.
 
@@ -237,7 +237,7 @@ Built-ins:
 
 Implemented in `core/triage.py`. Each detector hit goes through these steps:
 
-1. **Grouping**: a hit that shares a source with an open incident of the same kind, seen within `INCIDENT_GROUP_WINDOW_SECONDS` (default 900, `0` disables), updates that incident (`occurrences`, `last_seen`, merged sources) instead of creating a new one.
+1. **Grouping**: a hit that shares a source or a trace id (`details.trace_ids`, from the logs' `trace_id` field) with an open incident of the same kind, seen within `INCIDENT_GROUP_WINDOW_SECONDS` (default 900, `0` disables), updates that incident (`occurrences`, `last_seen`, merged sources) instead of creating a new one.
 2. **Routing**: the source with the most errors picks the owning team from `config/ownership.yaml` (`OWNERSHIP_FILE`; fnmatch patterns). Other owning teams are listed in `also_affected`. Unmatched sources go to `default_team`.
 3. **Deployment correlation**: deployments to affected services from `DEPLOY_CORRELATION_WINDOW_SECONDS` (default 1800) before the incident started up to its last error are attached. A deployment webhook that arrives late re-links open incidents.
 4. **Severity**: `core/severity.py` sums explainable factors into a score (0-100) and a level (`low`/`medium`/`high`/`critical`). The factors are volume vs threshold, CRITICAL logs, number of sources, PII, malicious source IPs (`threat_intel`, +15), service tier, recurrence, recent deployment, the LLM's rating, and prior false positives on the service (negative). Each factor is returned in `severity.factors`. An operator override always wins.
@@ -421,7 +421,7 @@ docker compose --profile kafka --profile spark up -d kafka spark api
 
 - **Runtime**: one container (the `spark` target of `dockerfile`, Java 21, `local[*]`). The Kafka and Delta jars download on first start and are cached in the `spark-ivy` volume. The Spark UI is on http://localhost:4040.
 - **Shared state**: the container reads `.env` and `./data/learned_pii.sqlite3`. `PII_PSEUDONYM_KEY` must match the api so learned entities apply. Approved PII rule suggestions in the same file apply too.
-- **Delta tables**: in Compose, Spark writes `/spark-data/delta-lake/logs_stream` and its checkpoints in the `spark-data` volume, not in `./data`. Each batch writes many small files, which is slow on a host bind mount (measured on a OneDrive folder: ~150 s lag vs ~50 s in a volume). This table is separate from the api's `data/delta-lake/logs`.
+- **Delta tables**: in Compose, Spark writes `/spark-data/delta-lake/logs_stream` and its checkpoints in the `spark-data` volume, not in `./data`. Each batch writes many small files, which is slow on a host bind mount (measured on a OneDrive folder: ~150 s lag vs ~50 s in a volume). The api writes its own `data/delta-lake/logs` and mounts `spark-data` read-only; `DELTA_LAKE_READ_PATHS` makes `/summary` and `/query` read both tables. Fields outside Spark's fixed columns are read from its `record` JSON column.
 - **Other settings**: `SPARK_TRIGGER` (`10 seconds`), `SPARK_MAX_OFFSETS_PER_TRIGGER` (200000), `SPARK_KAFKA_MIN_PARTITIONS` (number of cores), `SPARK_STARTING_OFFSETS` (`latest`), `SPARK_FORMAT_PROFILE`, `SPARK_CHECKPOINT_DIR`, `SPARK_SPIKE_OUTPUT_MODE` (`update` = alert as soon as a window crosses the threshold; `append` = once, after the watermark passes).
 - **Load test**: `uv run python scripts/load_test.py --rate 2000 --duration 30` sends synthetic logs (fake PII) to `logs-raw` and reads the Spark UI until the `logs` query has processed them. It reports producer rate, end-to-end throughput and lag after the last send. Start it after the job is up: with `SPARK_STARTING_OFFSETS=latest` a fresh job skips logs sent before its first batch. `--delta <host path>` also counts this run's rows in the table when `SPARK_DELTA_PATH` is on the host.
 

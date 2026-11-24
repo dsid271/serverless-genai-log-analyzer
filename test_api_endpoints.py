@@ -22,7 +22,8 @@ def test_api_ingest_search_summary_audit(monkeypatch):
                     "message": "Test error for endpoint coverage from john.doe@example.com",
                     "customer_id": "8827361",
                     "source_ip": "203.0.113.10",
-                    "request_id": "req-test-0001"
+                    "request_id": "req-test-0001",
+                    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
                 }
             ]
         }
@@ -77,6 +78,12 @@ def test_api_ingest_search_summary_audit(monkeypatch):
         search_json = search_response.json()
         assert "results" in search_json
         assert isinstance(search_json["results"], list)
+
+        # The trace id survives redaction and is stored under the canonical name.
+        traced = client.post("/query", json={"filters": {"trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"}})
+        assert traced.status_code == 200, traced.text
+        assert traced.json()["total"] >= 1
+        assert "4bf92f3577b34da6a3ce929d0e0e4736" in inc["details"]["trace_ids"]
 
         summary_response = client.get("/summary")
         assert summary_response.status_code == 200, summary_response.text
@@ -372,3 +379,83 @@ def test_orchestrator_embeds_patterns_only_and_all_mode_embeds_everything(monkey
 
     assert len(asyncio.run(run("pattern"))) == 1
     assert len(asyncio.run(run("all"))) == 5
+
+
+def _lake(tmp_path):
+    """API table plus a Spark-shaped table (fixed columns; other fields only inside `record`)."""
+    import json
+    import pandas as pd
+    from deltalake import write_deltalake
+    from storage.lake import DeltaLakeStorage
+
+    spark_path = str(tmp_path / "logs_stream")
+    rows = [{"timestamp": f"2026-08-01T12:0{i}:00Z", "source": "payments-api", "severity": "ERROR",
+             "record": json.dumps({"status_code": 500, "customer_id": c})} for i, c in enumerate(["c1", "c1", "c2"])]
+    write_deltalake(spark_path, pd.DataFrame(rows))
+    lake = DeltaLakeStorage(str(tmp_path / "logs"), read_paths=[spark_path, str(tmp_path / "missing")])
+    lake.save_logs([
+        {"timestamp": "2026-08-01T12:05:00Z", "source": "payments-api", "severity": "ERROR", "status_code": 500, "customer_id": "c2"},
+        {"timestamp": "2026-08-01T12:06:00Z", "source": "payments-api", "severity": "INFO", "status_code": 200, "customer_id": "c1"},
+        {"timestamp": "2026-08-01T12:07:00Z", "source": "auth", "severity": "ERROR", "customer_id": "c3"},
+    ])
+    return lake
+
+
+def test_lake_aggregate_counts_across_api_and_spark_tables(tmp_path):
+    import pandas as pd
+
+    lake = _lake(tmp_path)
+    out = lake.aggregate(filters={"status_code": 500}, group_by=["customer_id"])
+    assert out["rows"] == [{"customer_id": "c1", "count": 2}, {"customer_id": "c2", "count": 2}]
+    assert out["total"] == 4 and out["scanned"] == 6
+
+    window = lake.aggregate(filters={"status_code": ["500", "200"]}, group_by=["source", "status_code"],
+                            start=pd.Timestamp("2026-08-01T12:02:00Z"), end=pd.Timestamp("2026-08-01T12:06:00Z"))
+    assert window["rows"] == [{"source": "payments-api", "status_code": "500", "count": 2},
+                              {"source": "payments-api", "status_code": "200", "count": 1}]
+    nulls = lake.aggregate(group_by=["status_code"], limit=5)["rows"]
+    assert {"status_code": None, "count": 1} in nulls
+    assert lake.aggregate()["rows"] == [{"count": 6}]
+    hours = lake.get_summary(service="payments-api")["hourly_summaries"]
+    assert hours == [{"hour": "2026-08-01T12:00:00Z", "total_logs": 5, "error_count": 4, "error_rate": 0.8}]
+
+
+def test_query_endpoint_validates_and_aggregates(monkeypatch, tmp_path):
+    from api.main import orchestrator
+
+    monkeypatch.setenv("ENABLE_AUTH", "false")
+    monkeypatch.setattr(orchestrator, "storage", _lake(tmp_path))
+    client = TestClient(app)
+    ok = client.post("/query", json={"filters": {"status_code": 500}, "group_by": ["customer_id"],
+                                     "start": "2026-08-01T12:00:00Z", "end": "2026-08-01T12:04:00"})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["rows"] == [{"customer_id": "c1", "count": 2}, {"customer_id": "c2", "count": 1}]
+    assert client.post("/query", json={"last_minutes": 15}).json()["total"] == 0
+    assert client.post("/query", json={"group_by": ["bad field;"]}).status_code == 400
+    assert client.post("/query", json={"last_minutes": 5, "start": "2026-08-01T12:00:00Z"}).status_code == 400
+    assert client.post("/query", json={"limit": 0}).status_code == 422
+
+
+def test_triage_eval_grader():
+    from scripts.eval_triage import grade, summarize
+
+    titles = ["Payments DB connection pool exhaustion", "Log volume disk full"]
+    case = {"name": "pool", "expected_docs": [titles[0]], "severity": ["high"], "keywords": ["roll back|rollback", "pool"]}
+    good = {"status": "ok", "severity": "high", "hypotheses": ["DB pool too small after v2.4.0"],
+            "mitigations": ["Roll back payments-api"], "next_steps": ["Follow 'Payments DB connection-pool exhaustion'"],
+            "impact": "checkout fails", "references": [{"title": titles[0]}]}
+    assert grade(case, good, titles)["passed"]
+
+    misuse = {**good, "next_steps": ["See Log volume disk full", "Payments DB connection pool exhaustion"]}
+    r = grade(case, misuse, titles)
+    assert not r["checks"]["no_misuse"] and r["checks"]["cited"] and r["named"] == titles
+    r = grade(case, {**good, "severity": "low", "mitigations": ["restart"], "references": []}, titles)
+    assert {c for c, v in r["checks"].items() if not v} == {"retrieved", "severity", "keywords"}
+    assert r["missing_keywords"] == ["roll back|rollback"]
+
+    none_case = {"name": "none", "expected_docs": []}
+    assert grade(none_case, {**good, "next_steps": ["check image decoder"]}, titles)["passed"]
+    assert not grade(none_case, good, titles)["checks"]["cited"]
+    failed = grade(case, {"status": "failed", "detail": "quota"}, titles)
+    assert not failed["passed"] and failed["error"] == "quota"
+    assert summarize([failed, grade(case, good, titles)])["pass_rate"] == 0.5

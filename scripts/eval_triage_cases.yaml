@@ -1,0 +1,122 @@
+# Cases for scripts/eval_triage.py. Services and documents are fictional.
+# expected_docs: titles the answer should use ([] = none applies; naming any document fails)
+# severity: accepted levels (low / medium / high)
+# keywords: each entry must appear in the answer; "a|b" accepts either
+
+documents:
+  - kind: runbook
+    title: Payments DB connection pool exhaustion
+    services: [payments-api]
+    content: |
+      Symptoms: "Connection is not available, request timed out", "too many connections for role payments".
+      Usual cause: a release that raised DB_POOL_SIZE per pod, multiplied by the replica count.
+      Steps: 1) roll back the latest payments-api release; 2) check max_connections on the primary;
+      3) keep DB_POOL_SIZE x replicas below 80% of max_connections.
+  - kind: runbook
+    title: Auth JWT signing key rotation failure
+    services: [auth-service]
+    content: |
+      Symptoms: "JWT verification failed: invalid signature", "JWKS fetch failed".
+      Usual cause: the new signing key was activated before the JWKS endpoint published it.
+      Steps: 1) re-publish the JWKS document; 2) re-enable the previous signing key for the grace period;
+      3) restart auth-service pods so they reload the key set.
+  - kind: runbook
+    title: Log volume disk full
+    services: []
+    content: |
+      Symptoms: "No space left on device" on /var/log or the data volume.
+      Steps: 1) delete rotated logs older than 3 days; 2) check logrotate is running;
+      3) expand the persistent volume if usage stays above 85%.
+  - kind: reference
+    title: OWASP A03 Injection
+    services: []
+    content: |
+      SQL injection: attacker input changes query structure, e.g. ' OR '1'='1 or UNION SELECT.
+      Indicators: SQL syntax errors containing user input, bursts from a few IPs.
+      Mitigation: parameterized queries / prepared statements, input validation, block sources at the WAF.
+  - kind: runbook
+    title: Notification worker Kafka consumer lag
+    services: [notif-worker]
+    content: |
+      Symptoms: consumer lag above 100k on topic notifications. Steps: scale notif-worker consumers,
+      check for a poison message, raise max.poll.interval.ms if handlers are slow.
+
+cases:
+  - name: db-pool-after-deploy
+    expected_docs: [Payments DB connection pool exhaustion]
+    severity: [high]
+    keywords: ["roll back|rollback|revert", "pool"]
+    incident:
+      kind: error_spike
+      message: "Error spike detected: 64 errors in last 60s"
+      details:
+        count: 64
+        threshold: 20
+        sources: [payments-api]
+        source_counts: {payments-api: 64}
+        samples:
+          - "HikariPool-1 - Connection is not available, request timed out after 30000ms"
+          - "FATAL: too many connections for role payments"
+      deployments:
+        - {service: payments-api, version: v2.4.0, environment: production, deployed_at: 1795000000}
+
+  - name: jwt-key-rotation
+    expected_docs: [Auth JWT signing key rotation failure]
+    severity: [medium, high]
+    keywords: ["jwks|signing key"]
+    incident:
+      kind: error_spike
+      message: "Error spike detected: 41 errors in last 60s"
+      details:
+        count: 41
+        threshold: 20
+        sources: [auth-service]
+        source_counts: {auth-service: 41}
+        samples:
+          - "JWT verification failed: invalid signature"
+          - "JWKS fetch failed: 404 from /.well-known/jwks.json"
+
+  - name: disk-full
+    expected_docs: [Log volume disk full]
+    severity: [medium, high]
+    keywords: ["disk|space|volume"]
+    incident:
+      kind: error_spike
+      message: "Error spike detected: 25 errors in last 60s"
+      details:
+        count: 25
+        threshold: 20
+        sources: [orders-db]
+        source_counts: {orders-db: 25}
+        samples:
+          - "could not write to file pg_wal/xlogtemp: No space left on device"
+
+  - name: sql-injection-burst
+    expected_docs: [OWASP A03 Injection]
+    severity: [high]
+    keywords: ["parameteri|prepared statement|waf"]
+    incident:
+      kind: error_spike
+      message: "Error spike detected: 37 errors in last 60s"
+      details:
+        count: 37
+        threshold: 20
+        sources: [payments-api]
+        source_counts: {payments-api: 37}
+        samples:
+          - "syntax error at or near \"OR\" in SELECT * FROM accounts WHERE id = '1' OR '1'='1'"
+          - "syntax error at or near \"UNION\" in SELECT name FROM accounts WHERE id = '7' UNION SELECT password"
+
+  - name: no-runbook-applies
+    expected_docs: []
+    severity: [low, medium]
+    incident:
+      kind: error_spike
+      message: "Error spike detected: 22 errors in last 60s"
+      details:
+        count: 22
+        threshold: 20
+        sources: [image-resizer]
+        source_counts: {image-resizer: 22}
+        samples:
+          - "PIL.UnidentifiedImageError: cannot identify image file <_io.BytesIO object>"

@@ -1,10 +1,13 @@
 from fastapi import FastAPI, Request, Depends, Response, HTTPException
 from api.orchestrator import SystemOrchestrator
 from pydantic import BaseModel, Field
-from typing import Literal, List, Dict, Any, Optional
+from typing import Literal, List, Dict, Any, Optional, Union
+import asyncio
 import json
 import os
+import re
 import time
+import pandas as pd
 import logging
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
@@ -540,6 +543,40 @@ async def search_logs(request: Request, body: SearchRequest, user: User = Depend
     results = orchestrator.search(body.query, body.limit, body.filters)
     request.state.results_count = len(results)
     return {"results": results, "count": len(results)}
+
+_FIELD = r"^[A-Za-z0-9_.@-]{1,100}$"
+FilterValue = Union[str, int, float, bool]
+
+class QueryRequest(BaseModel):
+    # Exact match per field; a list matches any of its values. Values compare as strings.
+    filters: Dict[str, Union[FilterValue, List[FilterValue]]] = Field(default_factory=dict, max_length=20)
+    group_by: List[str] = Field(default_factory=list, max_length=5)
+    last_minutes: Optional[int] = Field(default=None, gt=0, le=525600)
+    start: Optional[datetime] = None
+    end: Optional[datetime] = None
+    limit: int = Field(default=100, gt=0, le=1000)
+
+@app.post("/query", tags=["Search"])
+@limiter.limit(rate_limit_default)
+async def query_logs(request: Request, body: QueryRequest, user: User = Depends(require_scope("logs:search"))):
+    """Exact counts over stored logs (API and Spark tables), e.g. 500s by customer_id in the last 15 minutes."""
+    bad = [f for f in [*body.filters, *body.group_by] if not re.match(_FIELD, f)]
+    if bad:
+        raise HTTPException(status_code=400, detail=f"Invalid field names: {bad}")
+    if body.last_minutes is not None and body.start is not None:
+        raise HTTPException(status_code=400, detail="Use either last_minutes or start, not both.")
+    start = pd.Timestamp(body.start) if body.start is not None else None
+    if body.last_minutes is not None:
+        start = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=body.last_minutes)
+    end = pd.Timestamp(body.end) if body.end is not None else None
+    start = start.tz_localize("UTC") if start is not None and start.tzinfo is None else start
+    end = end.tz_localize("UTC") if end is not None and end.tzinfo is None else end
+    request.state.audit_detail = _audit_text(json.dumps(body.model_dump(mode="json"), sort_keys=True))
+    result = await asyncio.to_thread(
+        orchestrator.storage.aggregate, body.filters, body.group_by, start, end, body.limit
+    )
+    request.state.results_count = len(result["rows"])
+    return result
 
 @app.get("/summary", tags=["Summary"])
 @limiter.limit(rate_limit_default)

@@ -106,6 +106,41 @@ def test_grouping_folds_overlapping_hits_into_one_incident(monkeypatch, tmp_path
     assert len(t.store.list()) == 2
 
 
+def test_shared_trace_id_groups_incidents_across_services(monkeypatch, tmp_path):
+    t = _triage(tmp_path, group_window="900", monkeypatch=monkeypatch)
+    db, _ = t.raise_incident("error_spike", "spike", {**_details({"orders-db": 8}), "trace_ids": ["t1", "t2"]})
+    api, is_new = t.raise_incident("error_spike", "spike", {**_details({"payments-api": 9}), "trace_ids": ["t2", "t3"]})
+    other, other_new = t.raise_incident("error_spike", "spike", {**_details({"notif-worker": 6}), "trace_ids": ["t9"]})
+
+    assert not is_new and api.id == db.id
+    assert api.details["sources"] == ["orders-db", "payments-api"]
+    assert api.details["trace_ids"] == ["t2", "t3", "t1"]
+    assert api.routing["team"] == "payments"
+    assert other_new and other.id != db.id
+
+
+def test_detector_and_spark_candidates_carry_trace_ids(monkeypatch, tmp_path):
+    from core.connectors.candidates_connector import CandidateHandler
+
+    async def scenario():
+        bus, store, det = _make(monkeypatch, tmp_path, cooldown="60", threshold="2")
+        await det.start()
+        await bus.publish({**_event("a"), "trace_id": "abc"})
+        await bus.publish({**_event("b"), "trace_id": "abc"})
+        await bus.publish(_event("b"))
+        await asyncio.sleep(0.3)
+        await det.stop()
+        return store.list(limit=10)
+
+    [inc] = asyncio.run(scenario())
+    assert inc["details"]["trace_ids"] == ["abc"]
+
+    (tmp_path / "c").mkdir()
+    triage = _triage(tmp_path / "c", "0", monkeypatch)
+    asyncio.run(CandidateHandler(triage)([{"source": "a", "window_start": "w", "count": 5, "trace_ids": ["x", None]}]))
+    assert triage.store.list()[0]["details"]["trace_ids"] == ["x"]
+
+
 def test_routing_and_severity_factors(monkeypatch, tmp_path):
     t = _triage(tmp_path, monkeypatch=monkeypatch)
     inc, _ = t.raise_incident("error_spike", "spike", _details({"orders-db": 2, "payments-api": 8}, critical=1))

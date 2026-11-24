@@ -30,6 +30,7 @@ COLUMNS = {
     "pii_fields": "string",
     "redaction_mode": "string",
     "record": "string",
+    "trace_id": "string",
 }
 
 
@@ -80,6 +81,7 @@ class RecordProcessor:
             "pii_fields": ",".join(clean.get("pii_fields") or []),
             "redaction_mode": str(clean.get("redaction_mode", "")),
             "record": json.dumps(clean, default=str),
+            "trace_id": str(clean["trace_id"]) if clean.get("trace_id") else None,
         }
 
 

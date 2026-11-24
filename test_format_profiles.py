@@ -28,6 +28,13 @@ def test_generic_aliases_and_level_names(norm):
     assert not {"ts", "level", "service", "msg"} & out.keys()
 
 
+def test_trace_id_aliases_map_to_trace_id(norm):
+    assert one(norm, {"message": "m", "traceId": "4bf92f35"}, "generic")["trace_id"] == "4bf92f35"
+    otel = one(norm, {"body": "m", "traceId": "4bf92f35", "resource": {"service": {"name": "s"}}}, "acme_ai_platform")
+    assert otel["trace_id"] == "4bf92f35" and "traceId" not in otel
+    assert "trace_id" not in one(norm, {"message": "m"}, "generic")
+
+
 def test_epoch_units_normalise_to_same_instant(norm):
     expected = "2023-11-14T22:13:20Z"
     for value in (1700000000, 1700000000000, 1700000000000000, 1700000000000000000, "1700000000"):
