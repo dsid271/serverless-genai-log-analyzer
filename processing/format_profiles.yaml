@@ -66,6 +66,21 @@ profiles:
     severity_map: *levels
     timestamp_formats: ["%Y-%m-%d %H:%M:%S,%f", "%d/%b/%Y:%H:%M:%S %z"]
 
+  # OTLP logs received at POST /v1/logs, already flattened by processing/otlp.py
+  # (resource attributes become resource_<name>, dots in names become underscores).
+  # Severity uses severityText, else the OTel severityNumber scale.
+  otlp:
+    fields:
+      timestamp: [timeUnixNano, observedTimeUnixNano]
+      severity: [severityText, severityNumber]
+      source: [resource_service_name]
+      message: [body]
+      trace_id: [traceId]
+    severity_map: *levels
+    defaults:
+      severity: INFO
+      source: unknown
+
   # Fictional "Acme AI Platform": OpenTelemetry-style log records.
   # Numeric severities (severityNumber) use the OTel scale automatically:
   # 1-4 trace, 5-8 debug, 9-12 info, 13-16 warn, 17-20 error, 21-24 fatal.

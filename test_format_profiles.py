@@ -101,6 +101,73 @@ def test_ingest_route_applies_profile_and_rejects_unknown(monkeypatch):
         assert "acme_insight" in bad.json()["detail"]
 
 
+_OTLP = {"resourceLogs": [{
+    "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "checkout"}},
+                                {"key": "k8s.pod", "value": {"stringValue": "p-1"}}]},
+    "scopeLogs": [{"scope": {"name": "app.http"}, "logRecords": [
+        {"timeUnixNano": "1700000000000000000", "severityText": "", "severityNumber": 17,
+         "body": {"stringValue": "upstream timeout"},
+         "traceId": "4bf92f3577b34da6a3ce929d0e0e4736", "spanId": "00f067aa0ba902b7",
+         "attributes": [{"key": "http.status_code", "value": {"intValue": "504"}},
+                        {"key": "http.duration_ms", "value": {"doubleValue": 3012.5}},
+                        {"key": "retry", "value": {"boolValue": True}}]},
+        {"severityText": "INFO", "body": {"stringValue": "ok"}, "traceId": "0" * 32, "timeUnixNano": "0"},
+    ]}],
+}]}
+
+
+def test_otlp_flatten_and_profile_mapping(norm):
+    from processing.otlp import OtlpError, flatten_otlp_logs
+
+    flat = flatten_otlp_logs(_OTLP)
+    assert len(flat) == 2
+    assert flat[0]["resource_service_name"] == "checkout" and flat[0]["http_status_code"] == 504
+    assert flat[0]["http_duration_ms"] == 3012.5 and flat[0]["retry"] is True and flat[0]["span_id"]
+    assert "traceId" not in flat[1] and "timeUnixNano" not in flat[1]   # zero values mean unset
+
+    first, second = norm.normalize_batch(flat, "otlp")
+    assert first["source"] == "checkout" and first["severity"] == "ERROR"   # from severityNumber 17
+    assert first["message"] == "upstream timeout" and first["timestamp"] == "2023-11-14T22:13:20Z"
+    assert first["trace_id"] == "4bf92f3577b34da6a3ce929d0e0e4736" and first["http_status_code"] == 504
+    assert second["source"] == "unknown" and second["severity"] == "INFO" and "trace_id" not in second
+
+    assert flatten_otlp_logs({}) == []
+    for bad in ([], {"resourceLogs": "x"}, {"resourceLogs": [1]}):
+        with pytest.raises(OtlpError):
+            flatten_otlp_logs(bad)
+
+
+def test_otlp_endpoint_accepts_json_and_gzip_and_rejects_others(monkeypatch):
+    import gzip
+    import json
+
+    monkeypatch.setenv("ENABLE_AUTH", "false")
+    monkeypatch.setenv("ENABLED_DETECTORS", "")
+    monkeypatch.setenv("ENABLED_ANALYZERS", "")
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    body = json.dumps(_OTLP).encode()
+    with TestClient(app) as client:
+        plain = client.post("/v1/logs", content=body, headers={"content-type": "application/json"})
+        assert plain.status_code == 200, plain.text
+        assert plain.json() == {}
+        zipped = client.post("/v1/logs", content=gzip.compress(body),
+                             headers={"content-type": "application/json", "content-encoding": "gzip"})
+        assert zipped.status_code == 200, zipped.text
+
+        found = client.post("/query", json={"filters": {"trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                                                        "http_status_code": 504}})
+        assert found.json()["total"] >= 2
+
+        assert client.post("/v1/logs", content=b"\x0a\x00",
+                           headers={"content-type": "application/x-protobuf"}).status_code == 415
+        assert client.post("/v1/logs", content=b"{nope", headers={"content-type": "application/json"}).status_code == 400
+        assert client.post("/v1/logs", content=b"[]", headers={"content-type": "application/json"}).status_code == 400
+        assert client.post("/v1/logs", content=b"junk", headers={
+            "content-type": "application/json", "content-encoding": "gzip"}).status_code == 400
+        assert client.post("/v1/logs", content=body, headers={
+            "content-type": "application/json", "content-encoding": "br"}).status_code == 415
+
+
 def test_spark_record_processor_normalizes_redacts_and_patterns(monkeypatch, tmp_path):
     import json
 

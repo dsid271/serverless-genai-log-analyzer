@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+import zlib
 import pandas as pd
 import logging
 from dotenv import load_dotenv
@@ -34,6 +35,7 @@ from api.audit import audit_logger
 from api.metrics import record_ingestion, record_pii_rule_counts, render_latest
 from fastapi.responses import FileResponse
 from processing.format_profiles import DEFAULT_PROFILE, get_normalizer
+from processing.otlp import OtlpError, flatten_otlp_logs
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -343,6 +345,60 @@ async def ingest_logs(request: Request, body: LogIngestRequest, user: User = Dep
     request.state.contains_pii = contains_pii
     record_ingestion(channel="api", sources=[log.get("source") for log in logs], contains_pii=contains_pii)
     return response
+
+_OTLP_MAX_BYTES = 10 * 1024 * 1024
+
+async def _otlp_json_body(request: Request) -> Any:
+    """Decoded JSON body of an OTLP/HTTP request (plain or gzip), capped at _OTLP_MAX_BYTES."""
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if content_type != "application/json":
+        raise HTTPException(
+            status_code=415,
+            detail="Only OTLP/HTTP JSON is supported. Set OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/json.",
+        )
+    raw = await request.body()
+    encoding = request.headers.get("content-encoding", "identity").strip().lower()
+    if encoding == "gzip":
+        inflater = zlib.decompressobj(wbits=31)
+        try:
+            raw = inflater.decompress(raw, _OTLP_MAX_BYTES)
+        except zlib.error:
+            raise HTTPException(status_code=400, detail="Invalid gzip body.")
+        if inflater.unconsumed_tail:
+            raise HTTPException(status_code=413, detail="Decompressed body is too large.")
+    elif encoding != "identity":
+        raise HTTPException(status_code=415, detail=f"Unsupported Content-Encoding {encoding!r}.")
+    if len(raw) > _OTLP_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Body is too large.")
+    try:
+        return json.loads(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Body is not valid JSON.")
+
+@app.post("/v1/logs", tags=["Ingestion"])
+@limiter.limit(rate_limit_ingest)
+async def ingest_otlp_logs(request: Request, user: User = Depends(require_scope("logs:ingest"))):
+    """OTLP/HTTP JSON logs endpoint: point an OpenTelemetry log exporter here.
+
+    Needs http/json (not protobuf). Records are flattened and mapped with the `otlp`
+    profile in processing/format_profiles.yaml, then follow the same path as /ingest.
+    Trace ids are kept as `trace_id`; only logs are accepted, not spans or metrics."""
+    try:
+        flat = flatten_otlp_logs(await _otlp_json_body(request))
+    except OtlpError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    normalizer = get_normalizer()
+    if not normalizer.has("otlp"):
+        raise HTTPException(status_code=503, detail="The 'otlp' format profile is missing from the format profiles file.")
+    logs = normalizer.normalize_batch(flat, "otlp")
+    response = await orchestrator.ingest_logs(logs)
+    request.state.results_count = response.get("count", 0)
+    contains_pii = bool(response.get("contains_pii", False))
+    request.state.pii_accessed = contains_pii
+    request.state.contains_pii = contains_pii
+    record_ingestion(channel="otlp", sources=[log.get("source") for log in logs], contains_pii=contains_pii)
+    # An empty object is a full success in OTLP/HTTP.
+    return {}
 
 @app.post("/analyze", tags=["Analysis"])
 @limiter.limit(rate_limit_analyze)

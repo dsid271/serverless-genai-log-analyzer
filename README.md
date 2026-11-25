@@ -16,7 +16,7 @@ On-call engineers face thousands of near-identical log lines that often contain 
 
 ## Implemented Now (MVP)
 
-- **FastAPI API** with `GET /`, `POST /ingest`, `POST /analyze`, `GET /plugins`, `GET /incidents`, `GET /incidents/{id}`, `POST /incidents/{id}/feedback`, `GET /feedback`, `POST /events/deployments`, `GET /deployments`, `POST|GET /knowledge`, `DELETE /knowledge/{id}`, `POST /search`, `POST /query`, `GET /summary`, `GET /audit-trail`, `GET /metrics`, `GET /admin/integrations`
+- **FastAPI API** with `GET /`, `POST /ingest`, `POST /v1/logs` (OTLP/HTTP JSON), `POST /analyze`, `GET /plugins`, `GET /incidents`, `GET /incidents/{id}`, `POST /incidents/{id}/feedback`, `GET /feedback`, `POST /events/deployments`, `GET /deployments`, `POST|GET /knowledge`, `DELETE /knowledge/{id}`, `POST /search`, `POST /query`, `GET /summary`, `GET /audit-trail`, `GET /metrics`, `GET /admin/integrations`
 - **Modular plugin system** via `ENABLED_CONNECTORS`, `ENABLED_DETECTORS`, `ENABLED_ANALYZERS`
 - **Plugin loading** via `PLUGIN_MODULES` (derived-image friendly)
 - **Error-spike detection** (`error_spike`) that raises incidents into a **SQLite incident store** (`INCIDENTS_DB`), with analyzer outputs attached
@@ -376,6 +376,7 @@ The opt-in Kafka connector (`core/connectors/kafka_connector.py`) reads JSON log
 - **Opt-in**: set `ENABLED_CONNECTORS=kafka`. It does not start by default.
 - **Fail-safe**: if the broker is not reachable yet, the connector retries in the background and the API still starts.
 - **Manual ingestion**: `POST /ingest` accepts logs over HTTP and needs no broker.
+- **OpenTelemetry logs**: `POST /v1/logs` accepts OTLP/HTTP **JSON** log exports (also gzip). Set `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/json` and `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:8000/v1/logs`; protobuf gets a 415. Records go through the `otlp` format profile, then the same pipeline as `/ingest`. Resource and log attributes are stored as columns with dots turned into underscores (`http.status_code` becomes `http_status_code`), so `/query` can count and group by them. Only logs are accepted: no spans or metrics, so latency that is not written into a log record is not seen. Needs the `logs:ingest` scope when auth is on. Tested with hand-built payloads, not with a real OpenTelemetry SDK.
 
 ### Throughput settings
 
@@ -388,7 +389,7 @@ The opt-in Kafka connector (`core/connectors/kafka_connector.py`) reads JSON log
 
 Different platforms name their fields differently (`_time`, `log_level`, `severityNumber`, nested `resource.service.name`, epoch timestamps). A **format profile** in `processing/format_profiles.yaml` maps those onto the internal fields `timestamp`, `severity`, `source` and `message` before redaction, storage and detection. Records already using the internal names pass through unchanged. PII rules are separate (`pii_profiles.yaml`).
 
-- **Built-in profiles**: `generic` (default), `siem_hec`, `acme_insight`, `acme_ai_platform`. The last two are fictional examples to copy from.
+- **Built-in profiles**: `generic` (default), `siem_hec`, `otlp` (used by `POST /v1/logs`), `acme_insight`, `acme_ai_platform`. The last two are fictional examples to copy from.
 - **Select one**: `LOG_FORMAT_PROFILE` (all channels), `KAFKA_FORMAT_PROFILE` (Kafka only), or `{"format": "acme_insight", "logs": [...]}` on `POST /ingest`. An unknown name returns 400 on the API and stops the Kafka connector from starting.
 - **Onboard a platform**: add a profile with candidate field paths (first non-empty wins), a `severity_map`, optional `timestamp_formats` and `defaults`. No code change. Use `FORMAT_PROFILES_PATH` to load a different file.
 
