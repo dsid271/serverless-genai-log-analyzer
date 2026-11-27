@@ -266,3 +266,60 @@ def test_candidate_payload_shape():
                            "pii": 1, "patterns": 2, "sample": "x", "threshold": 6.0, "baseline": 2.0,
                            "reason": "baseline"})
     assert p["window_start"].endswith("Z") and p["contains_pii"] is True and p["reason"] == "baseline"
+
+
+def test_latency_ms_takes_first_usable_field():
+    from spark.transform import latency_ms
+
+    fields = ["duration_ms", "latency_ms", "http_duration_ms"]
+    assert latency_ms({"duration_ms": "812.5"}, fields) == 812.5
+    assert latency_ms({"duration_ms": True, "latency_ms": -3, "http_duration_ms": 40}, fields) == 40.0
+    assert latency_ms({"duration_ms": "slow", "latency_ms": float("nan")}, fields) is None
+    assert latency_ms({"message": "no timing"}, fields) is None
+
+
+def _latency(source, p95s, start=0, length=60, n=50):
+    return [{"source": source, "start": start + i * length, "end": start + (i + 1) * length, "n": n, "p95_ms": v}
+            for i, v in enumerate(p95s)]
+
+
+def test_latency_baseline_alerts_on_relative_p95_jump_and_ignores_idle_gaps():
+    from spark.baseline import SpikeBaseline
+    from spark.streaming_job import select_latency_rows
+
+    b = SpikeBaseline(threshold=1000, factor=2.0, min_count=200, alpha=0.5, warmup=2,
+                      value_key="p95_ms", fill_gaps=False)
+    # Warm-up: 1200 ms crosses the fixed 1000 ms limit; a 30 -> 90 ms jump does not.
+    out = b.evaluate(_latency("checkout", [1200, 1100]) + _latency("search", [30, 30]))
+    assert [(o["source"], o["reason"]) for o in out] == [("checkout", "threshold")] * 2
+    # A long idle gap must not drag search's p95 baseline toward zero.
+    b.evaluate(_latency("search", [30], start=6000))
+    assert b.baseline("search") == 30.0
+    # Warm: 250 ms is 8x search's baseline and above the 200 ms floor; checkout's 1300 is under 2x 1150.
+    out = b.evaluate(_latency("search", [250], start=6060) + _latency("checkout", [1300], start=120))
+    assert [(o["source"], o["reason"], o["threshold"]) for o in out] == [("search", "baseline", 200.0)]
+
+    few = _latency("search", [5000], n=3) + [{"source": "x", "start": 0, "end": 60, "n": 99, "p95_ms": None}]
+    assert select_latency_rows(few, min_samples=20) == []
+
+
+def test_latency_candidate_raises_latency_incident_scored_on_p95(monkeypatch, tmp_path):
+    from core.connectors.candidates_connector import CandidateHandler
+    from spark.streaming_job import latency_payload
+
+    triage = _triage(tmp_path, "900", monkeypatch)
+    cand = latency_payload({"source": "payments-api", "start": 1791712800, "end": 1791712860, "n": 120,
+                            "p50_ms": 180.0, "p95_ms": 2400.0, "p99_ms": 3100.123, "max_ms": 4000.0,
+                            "sample": "GET /pay", "trace_ids": ["t1"], "threshold": 800.0,
+                            "baseline": 400.0, "reason": "baseline"})
+    error = {"source": "payments-api", "window_start": cand["window_start"], "count": 25, "threshold": 20}
+
+    asyncio.run(CandidateHandler(triage)([cand, cand, error]))
+    items = triage.store.list(limit=10)
+    assert sorted(i["kind"] for i in items) == ["error_spike", "latency_spike"]
+    lat = next(i for i in items if i["kind"] == "latency_spike")
+    assert lat["details"]["p95_ms"] == 2400.0 and lat["details"]["p99_ms"] == 3100.12
+    assert lat["details"]["baseline_p95_ms"] == 400.0 and lat["details"]["count"] == 120
+    assert "p95 2400.0 ms" in lat["message"] and lat["routing"]["team"] == "payments"
+    factors = {f["factor"]: f for f in lat["severity"]["factors"]}
+    assert "volume" not in factors and factors["latency"]["points"] == 30

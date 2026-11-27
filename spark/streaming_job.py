@@ -5,6 +5,8 @@
   Delta stream -> per-source error counts in event-time windows with a watermark
     -> windows above the source's baseline (spark/baseline.py) go to Kafka
        (incident-candidates)                                                 (query "spikes")
+  Delta stream -> per-source p95 of duration_ms in the same windows, judged against the
+    source's own p95 baseline -> Kafka (incident-candidates, kind latency_spike)   (query "latency")
 
 The API consumes incident-candidates with the `spark_candidates` connector.
 Run: python -m spark.streaming_job   (needs Java 17+; see the `spark` target of dockerfile)
@@ -101,6 +103,28 @@ def window_counts(logs, window: str, watermark: str):
     )
 
 
+def window_latency(logs, window: str, watermark: str):
+    """Per-source latency percentiles of every log (not only errors) that carries duration_ms."""
+    from pyspark.sql import functions as F
+
+    q = F.percentile_approx("duration_ms", [0.5, 0.95, 0.99], 10000)
+    return (
+        logs.filter(F.col("duration_ms").isNotNull())
+        .withWatermark("event_time", watermark)
+        .groupBy(F.window("event_time", window).alias("w"), F.col("source"))
+        .agg(
+            F.count(F.lit(1)).alias("n"),
+            q.alias("q"),
+            F.max("duration_ms").alias("max_ms"),
+            F.max_by("message", "duration_ms").alias("sample"),
+            F.slice(F.collect_set("trace_id"), 1, 50).alias("trace_ids"),
+        )
+        .select("source", F.unix_timestamp("w.start").alias("start"), F.unix_timestamp("w.end").alias("end"),
+                "n", F.col("q")[0].alias("p50_ms"), F.col("q")[1].alias("p95_ms"), F.col("q")[2].alias("p99_ms"),
+                "max_ms", "sample", "trace_ids")
+    )
+
+
 def _iso(epoch: float) -> str:
     import datetime as dt
 
@@ -124,18 +148,49 @@ def candidate_payload(row: dict) -> dict:
     }
 
 
-def spike_publisher(baseline: SpikeBaseline, bootstrap: str, topic: str):
-    """foreachBatch function: updated window counts -> baseline check -> Kafka."""
+def _ms(value) -> float | None:
+    return None if value is None else round(float(value), 2)
+
+
+def latency_payload(row: dict) -> dict:
+    return {
+        "kind": "latency_spike",
+        "source": row["source"],
+        "window_start": _iso(row["start"]),
+        "window_end": _iso(row["end"]),
+        "count": int(row["n"]),
+        "p50_ms": _ms(row.get("p50_ms")),
+        "p95_ms": _ms(row["p95_ms"]),
+        "p99_ms": _ms(row.get("p99_ms")),
+        "max_ms": _ms(row.get("max_ms")),
+        "sample": row.get("sample"),
+        "trace_ids": list(row.get("trace_ids") or []),
+        "threshold": row["threshold"],
+        "baseline": row["baseline"],
+        "reason": row["reason"],
+    }
+
+
+def select_latency_rows(rows: list, min_samples: int) -> list:
+    """Windows with too few requests give a noisy p95; they neither alert nor join the baseline."""
+    return [r for r in rows if r.get("p95_ms") is not None and int(r.get("n") or 0) >= min_samples]
+
+
+def spike_publisher(baseline: SpikeBaseline, bootstrap: str, topic: str,
+                    payload=candidate_payload, select=None):
+    """foreachBatch function: updated windows -> baseline check -> Kafka."""
     def publish(batch_df, batch_id: int) -> None:
         rows = [r.asDict() for r in batch_df.collect()]
+        if select is not None:
+            rows = select(rows)
         spikes = baseline.evaluate(rows) if rows else []
         if not spikes:
             return
-        records = [(s["source"], json.dumps(candidate_payload(s))) for s in spikes]
+        records = [(s["source"], json.dumps(payload(s))) for s in spikes]
         (batch_df.sparkSession.createDataFrame(records, "key string, value string")
          .write.format("kafka").option("kafka.bootstrap.servers", bootstrap)
          .option("topic", topic).save())
-        logger.info("batch %s: published %d spike candidate(s)", batch_id, len(spikes))
+        logger.info("batch %s: published %d candidate(s) to %s", batch_id, len(spikes), topic)
     return publish
 
 
@@ -172,11 +227,10 @@ def main() -> None:
      .option("checkpointLocation", os.path.join(checkpoints, "logs"))
      .trigger(processingTime=trigger).start(delta_path))
 
-    counts = window_counts(
-        spark.readStream.format("delta").load(delta_path),
-        window=_env("SPARK_SPIKE_WINDOW", "60 seconds"),
-        watermark=_env("SPARK_WATERMARK", "2 minutes"),
-    )
+    window = _env("SPARK_SPIKE_WINDOW", "60 seconds")
+    watermark = _env("SPARK_WATERMARK", "2 minutes")
+    candidates_topic = _env("SPARK_CANDIDATES_TOPIC", "incident-candidates")
+    counts = window_counts(spark.readStream.format("delta").load(delta_path), window=window, watermark=watermark)
     baseline = SpikeBaseline.from_env(
         threshold=int(_env("SPARK_SPIKE_THRESHOLD", _env("ERROR_SPIKE_THRESHOLD", "20"))),
         state_path=os.path.join(checkpoints, "baseline.json"),
@@ -185,9 +239,28 @@ def main() -> None:
     # crosses; the baseline publishes each (source, window) once.
     (counts.writeStream.queryName("spikes")
      .outputMode(_env("SPARK_SPIKE_OUTPUT_MODE", "update"))
-     .foreachBatch(spike_publisher(baseline, bootstrap, _env("SPARK_CANDIDATES_TOPIC", "incident-candidates")))
+     .foreachBatch(spike_publisher(baseline, bootstrap, candidates_topic))
      .option("checkpointLocation", os.path.join(checkpoints, "spikes"))
      .trigger(processingTime=trigger).start())
+
+    if _env("SPARK_LATENCY_ENABLED", "true").lower() in ("1", "true", "yes"):
+        latency_baseline = SpikeBaseline(
+            threshold=float(_env("SPARK_LATENCY_THRESHOLD_MS", "1000")),
+            factor=float(_env("SPARK_LATENCY_FACTOR", "2.0")),
+            min_count=float(_env("SPARK_LATENCY_MIN_MS", "200")),
+            alpha=float(_env("SPARK_LATENCY_ALPHA", "0.2")),
+            warmup=int(_env("SPARK_LATENCY_WARMUP", "5")),
+            state_path=os.path.join(checkpoints, "latency_baseline.json"),
+            value_key="p95_ms", fill_gaps=False,
+        )
+        min_samples = int(_env("SPARK_LATENCY_MIN_SAMPLES", "20"))
+        (window_latency(spark.readStream.format("delta").load(delta_path), window=window, watermark=watermark)
+         .writeStream.queryName("latency")
+         .outputMode(_env("SPARK_SPIKE_OUTPUT_MODE", "update"))
+         .foreachBatch(spike_publisher(latency_baseline, bootstrap, candidates_topic, payload=latency_payload,
+                                       select=lambda rows: select_latency_rows(rows, min_samples)))
+         .option("checkpointLocation", os.path.join(checkpoints, "latency"))
+         .trigger(processingTime=trigger).start())
 
     logger.info("Streaming %s -> %s; spikes -> Kafka", bootstrap, delta_path)
     spark.streams.awaitAnyTermination()

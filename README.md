@@ -32,7 +32,7 @@ On-call engineers face thousands of near-identical log lines that often contain 
 
 ## Known Limitations
 
-- **Detection is a static threshold**: one detector counts `ERROR`/`CRITICAL` logs in a sliding window. There is no learned baseline and no prediction. Grouping joins hits that share a source or a `trace_id` within `INCIDENT_GROUP_WINDOW_SECONDS`. Services whose errors carry no common trace id are not linked; there is no service dependency graph.
+- **Detection is a static threshold on the API path**: the API's detector counts `ERROR`/`CRITICAL` logs in a sliding window, with no learned baseline and no prediction. Only the opt-in Spark job uses per-source baselines, for error counts and for p95 latency (see below). Grouping joins hits that share a source or a `trace_id` within `INCIDENT_GROUP_WINDOW_SECONDS`. Services whose errors carry no common trace id are not linked; there is no service dependency graph.
 - **Severity weights are hand-set**: the factors in `core/severity.py` are not fitted to historical data. Feedback is stored (`GET /feedback`) but nothing retrains on it yet; false positives only lower the score of later incidents on the same service.
 - **LLM triage eval is small**: `scripts/eval_triage.py` runs `gemini_triage` on the cases in `scripts/eval_triage_cases.yaml` and checks retrieval, that the answer cites the expected runbook and no other, severity and keywords. Five fictional cases, matched on titles and keywords; it is not a measure of accuracy on real incidents.
 - **Routing is a static file**: `config/ownership.yaml` is read at startup. There is no on-call schedule. PagerDuty and ServiceNow tickets are sent, but routing keys and assignment groups are mapped per team through env vars, not synced from those systems.
@@ -241,7 +241,7 @@ Implemented in `core/triage.py`. Each detector hit goes through these steps:
 1. **Grouping**: a hit that shares a source or a trace id (`details.trace_ids`, from the logs' `trace_id` field) with an open incident of the same kind, seen within `INCIDENT_GROUP_WINDOW_SECONDS` (default 900, `0` disables), updates that incident (`occurrences`, `last_seen`, merged sources) instead of creating a new one.
 2. **Routing**: the source with the most errors picks the owning team from `config/ownership.yaml` (`OWNERSHIP_FILE`; fnmatch patterns). Other owning teams are listed in `also_affected`. Unmatched sources go to `default_team`.
 3. **Deployment correlation**: deployments to affected services from `DEPLOY_CORRELATION_WINDOW_SECONDS` (default 1800) before the incident started up to its last error are attached. A deployment webhook that arrives late re-links open incidents.
-4. **Severity**: `core/severity.py` sums explainable factors into a score (0-100) and a level (`low`/`medium`/`high`/`critical`). The factors are volume vs threshold, CRITICAL logs, number of sources, PII, malicious source IPs (`threat_intel`, +15), service tier, recurrence, recent deployment, the LLM's rating, and prior false positives on the service (negative). Each factor is returned in `severity.factors`. An operator override always wins.
+4. **Severity**: `core/severity.py` sums explainable factors into a score (0-100) and a level (`low`/`medium`/`high`/`critical`). The factors are volume vs threshold (p95 vs threshold for `latency_spike`), CRITICAL logs, number of sources, PII, malicious source IPs (`threat_intel`, +15), service tier, recurrence, recent deployment, the LLM's rating, and prior false positives on the service (negative). Each factor is returned in `severity.factors`. An operator override always wins.
 
 Change events (CI/CD), using a `deploy-webhook` key:
 ```powershell
@@ -414,7 +414,12 @@ For sustained high volume (thousands of events per second), `spark/streaming_job
    - **Spike**: count ≥ `SPARK_BASELINE_FACTOR` × baseline and ≥ `SPARK_BASELINE_MIN_COUNT`.
    - **Warm-up**: until a source has `SPARK_BASELINE_WARMUP` windows, the fixed `SPARK_SPIKE_THRESHOLD` (default: `ERROR_SPIKE_THRESHOLD`) applies. `SPARK_BASELINE_FACTOR=0` keeps the fixed threshold always.
    - **State**: kept in `<SPARK_CHECKPOINT_DIR>/baseline.json`, so it survives restarts. Each candidate carries `threshold`, `baseline` and `reason` (`threshold` or `baseline`).
-3. **API**: the `spark_candidates` connector consumes that topic and raises `error_spike` incidents through the normal triage, routing, analyzer and ticketing path, once per source and window.
+3. **`latency` query**: catches slow requests that still return 200. Each log's latency is the first number found in `SPARK_LATENCY_FIELDS` (default `duration_ms,latency_ms,response_time_ms,elapsed_ms,http_duration_ms`) and is stored in the `duration_ms` column. Per source and window, the query computes `p50`/`p95`/`p99`/`max` (Spark `percentile_approx`) over every log with a latency, errors or not, and judges p95 the same way as error counts:
+   - **Spike**: p95 ≥ `SPARK_LATENCY_FACTOR` (2.0) × the source's p95 baseline and ≥ `SPARK_LATENCY_MIN_MS` (200). Until `SPARK_LATENCY_WARMUP` (5) windows, the fixed `SPARK_LATENCY_THRESHOLD_MS` (1000) applies.
+   - **Noise**: windows with fewer than `SPARK_LATENCY_MIN_SAMPLES` (20) requests are skipped. Windows without requests do not count as zero, so an idle night does not lower the baseline.
+   - **State**: `<SPARK_CHECKPOINT_DIR>/latency_baseline.json`. `SPARK_LATENCY_ENABLED=false` turns the query off.
+   - Rows written before the `duration_ms` column existed have it empty; `/query` with `"metric": "duration_ms"` does not see their latency.
+4. **API**: the `spark_candidates` connector consumes that topic and raises `error_spike` or `latency_spike` incidents through the normal triage, routing, analyzer and ticketing path, once per kind, source and window. A `latency_spike` is scored on p95 vs its threshold (factor `latency`) instead of error volume.
 
 ```powershell
 # .env: ENABLED_CONNECTORS=spark_candidates   (not "kafka": Spark is now the logs-raw consumer)
