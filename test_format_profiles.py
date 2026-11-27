@@ -129,7 +129,8 @@ def test_otlp_flatten_and_profile_mapping(norm):
     assert first["source"] == "checkout" and first["severity"] == "ERROR"   # from severityNumber 17
     assert first["message"] == "upstream timeout" and first["timestamp"] == "2023-11-14T22:13:20Z"
     assert first["trace_id"] == "4bf92f3577b34da6a3ce929d0e0e4736" and first["http_status_code"] == 504
-    assert second["source"] == "unknown" and second["severity"] == "INFO" and "trace_id" not in second
+    # Resource attributes apply to every record in the resource, so the second record is also "checkout".
+    assert second["source"] == "checkout" and second["severity"] == "INFO" and "trace_id" not in second
 
     assert flatten_otlp_logs({}) == []
     for bad in ([], {"resourceLogs": "x"}, {"resourceLogs": [1]}):

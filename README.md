@@ -27,6 +27,7 @@ On-call engineers face thousands of near-identical log lines that often contain 
 - **IP enrichment** (see [Enrichment](#enrichment)): GeoLite2 country and AbuseIPDB reputation for public IPs; malicious IPs raise severity
 - **Ticketing** (see [Ticketing](#ticketing)): PagerDuty, ServiceNow and a signed generic webhook, opened/updated/resolved from incident changes
 - **OWASP Top 10 / CWE reference docs** seeded into the knowledge base by `scripts/load_owasp_cwe.py`
+- **Exact counts and latency percentiles** (`POST /query`): filter and group stored logs by any field, and add `"metric": "<numeric field>"` (for example `http_duration_ms` from OTLP attributes) to get `n`, `avg`, `p50`, `p95`, `p99` and `max` per group. Percentiles are linearly interpolated and computed over the rows where the field is a number; the whole table is read per request
 - **API-key issuance**: keys stored in SQLite (hashed), issued per profile with scopes and expiry, revocable via CLI or `/admin/keys`
 
 ## Known Limitations
@@ -39,11 +40,11 @@ On-call engineers face thousands of near-identical log lines that often contain 
 - **No remediation**: no automated actions.
 - **Enrichment is limited**: GeoIP country and AbuseIPDB reputation only. There is no CMDB lookup. AbuseIPDB's free tier (1,000 checks/day) caps how many new IPs are checked.
 - **PII redaction quality is not measured**: there is no evaluation set. Without the spaCy model it runs in rules-only mode and will not catch names.
-- **Storage is local disk** (`./data/delta-lake`, `./data/chroma`, SQLite files under `./data`). This is deliberate, to keep the project free to run (see the Abstract). It survives restarts when `./data` is a mounted volume, but is lost on serverless platforms that give containers ephemeral disk. Back up `./data` yourself (for example `rclone sync`; use SQLite's `.backup` or Litestream for the `.sqlite3` files, not a plain copy).
+- **Storage is local disk** (`./data/delta-lake`, `./data/chroma`, SQLite files under `./data`). This is deliberate, to keep the project free to run (see the Abstract). It survives restarts when `./data` is a mounted volume, but is lost on serverless platforms that give containers ephemeral disk. Back it up with `scripts/backup.py` (see [Backup and restore](#backup-and-restore-local-no-cloud-account)); a real transfer to a remote has not been rehearsed.
 - **Auth is off by default** (`ENABLE_AUTH=false`).
 - **Verified end to end (local, 2026-10-12)**: Kafka → Spark → API → incident through the `spark_candidates` connector, and the Prometheus/Grafana stack, with ticket dispatch off. **Not verified**: PagerDuty and webhook ticketing (tested with fakes only; ServiceNow ticket creation was tested live) and the API's own `kafka` log connector under load.
 - **No fallbacks**: if the redactor, Delta Lake, or Chroma cannot start, the API refuses to start. Without `GEMINI_API_KEY`, `POST /analyze` returns 503.
-- **Test coverage is thin**: 84 tests cover the API, auth and rate limiting, key issuance, audit logger, redactor, error-spike detector, triage, ticket dispatch, webhook signing and IP enrichment. There are no tests for the Kafka connector, analyzers, or the LLM path.
+- **Test coverage is partial**: over 100 tests cover the API, auth and rate limiting, key issuance, audit logger, redactor, detector, triage, ticket dispatch, webhook signing, IP enrichment, OTLP ingestion, `/query`, the Kafka consumer and connector (fake aiokafka objects, no broker), and `gemini_triage` (fake Gemini client). No test talks to a real Kafka broker, Gemini or PagerDuty, and the Spark job itself is only tested through its pure-Python parts.
 
 ## System Architecture
 
@@ -428,6 +429,26 @@ docker compose --profile kafka --profile spark up -d kafka spark api
 
 ---
 
+## Backup and restore (local, no cloud account)
+
+State lives in files under `./data` (Delta Lake, Chroma, SQLite) and in the `spark-data` Docker volume. `scripts/backup.py` copies it to a folder or to any [rclone](https://rclone.org/install/) remote, such as an external drive or the free tiers of Cloudflare R2 or Backblaze B2:
+
+```powershell
+uv run python scripts/backup.py --dest D:\backups\gla            # a local folder
+uv run python scripts/backup.py --dest r2:my-bucket/gla          # an rclone remote (run `rclone config` once)
+uv run python scripts/backup.py --dest D:\backups\gla --dry-run  # print the plan, copy nothing
+```
+
+- **SQLite files** (incidents, API keys, learned PII and PII rules) are copied with SQLite's online backup API, so a file in use is captured consistently. A plain `cp` of a live SQLite file can be corrupt.
+- **Delta tables** are copied data files first and `_delta_log` last, so the copy never lists a file it lacks.
+- **Chroma** is copied as-is. Its index files cannot be snapshotted safely while the api writes, so stop the api first for a consistent copy (`--skip-chroma` leaves it out).
+- **The Spark table** is in a named volume, not under `./data`. Export it to a host folder, then pass it with `--extra spark=<folder>`: `docker run --rm -v <project>_spark-data:/src -v ${PWD}/spark-export:/dst alpine cp -a /src/. /dst` (find the volume name with `docker volume ls`).
+- **Schedule it** with Windows Task Scheduler or cron. The recovery point is the time since the last run.
+- **Restore**: stop the stack, copy the folders back to the same paths (`sqlite/*.sqlite3` to the paths in `INCIDENTS_DB`, `API_KEYS_DB`, `PII_LEARNED_DB`), and start it again. A full restore from a remote has not been rehearsed; the unit tests cover the SQLite snapshot and the order of the rclone commands, not a real transfer.
+- **Litestream** (continuous SQLite replication) is not set up. It needs WAL mode, and only the learned-PII and PII-rules files use it; `incidents.sqlite3` and `api_keys.sqlite3` use SQLite's default journal.
+
+---
+
 ## Observability (Prometheus + Grafana, local Docker Compose)
 
 The API exposes a `GET /metrics` endpoint (`api/metrics.py`) with:
@@ -452,11 +473,12 @@ Entirely local, no cloud cost.
 ## Testing
 Run the pytest suite (needs `uv sync --extra dev`):
 ```powershell
-uv run pytest test_api_endpoints.py test_audit.py test_redactor.py test_error_spike.py -q
+uv run pytest test_api_endpoints.py test_audit.py test_redactor.py test_error_spike.py test_auth_rate_limit.py test_format_profiles.py -q
 ```
 
 Notes:
-- CI runs this same command.
+- CI runs this same command, then `uv run python scripts/eval_triage.py --retrieval-only --min-pass 1.0`: no LLM and no key, it checks that each case in `scripts/eval_triage_cases.yaml` retrieves its expected runbook. The full eval (answer grounding) needs `GEMINI_API_KEY` and is not run in CI.
+- `test_api_endpoints.py` also covers `gemini_triage` with a fake Gemini client (prompt contents, whitelisted incident fields, references, failure), the analyzer runner when a key is missing, `LogConsumer` and `KafkaConnector` with fake aiokafka objects (decoding, commit only after the batch is stored, rewind on failure, reconnect backoff), `/query` latency percentiles, and the backup script.
 - `test_error_spike.py` covers the detector (it used to stop after its first incident) and triage: grouping, routing, severity factors, late deployment correlation, and feedback.
 - `test_api_endpoints.py` also covers the ticket dispatcher (threshold, retry after failure, update, resolve), webhook HMAC signing, and batched IP enrichment, all with fakes and no network calls.
 - Without the spaCy model, the redactor tests run in rules-only mode.

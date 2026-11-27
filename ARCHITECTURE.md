@@ -88,7 +88,7 @@ flowchart TD
 
 ### 2. **Kafka (Ingestion Layer)** `[IMPLEMENTED — Optional]`
 
-**Purpose**: 
+**Purpose**:
 - Buffer incoming logs; decouple producers/consumers
 - Enable replay (for reprocessing); partition for scalability
 - Provide durable queue with configurable retention
@@ -126,7 +126,7 @@ flowchart TD
 
 **Implemented today**: `spark/streaming_job.py` runs in one Docker container (`local[*]`, Compose profile `spark`, built from the `spark` target of `dockerfile`). It reads `logs-raw`, applies format profiles, rule-tier redaction (with learned entities and approved PII rule suggestions) and message patterns, writes Delta Lake partitioned by `date`/`source`, and publishes windowed per-source error spikes to `incident-candidates`. The API's `spark_candidates` connector turns those into incidents. It has been run end-to-end locally; it has not been load-tested or deployed to a cluster. The rest of this section is the target design.
 
-**Purpose**: 
+**Purpose**:
 - Parse, enrich, filter, and aggregate logs in real time
 - Maintain low latency (<5s end-to-end from Kafka to Delta Lake)
 - Support stateful processing (windowing, deduplication)
@@ -228,10 +228,13 @@ errors_per_service = parsed_df \
 
 ### 4. **Delta Lake / Iceberg (Storage Layer)** `[IMPLEMENTED — Local filesystem]`
 
-**Purpose**: 
+**Purpose**:
 - ACID-compliant, time-travel capable data lake
 - Immutable audit trail for compliance
 - Schema evolution support (columns added/removed over time)
+
+**Durability (local-first)**: state is files under `./data` plus the `spark-data` volume, so it survives restarts but not loss of the disk. `scripts/backup.py` copies it to a folder or rclone remote: SQLite through its online backup API, Delta data files before `_delta_log`, Chroma as-is (stop the api for a consistent copy). Recovery point equals the backup interval; Litestream is not configured because the incident and API-key databases are not in WAL mode. See the README, "Backup and restore".
+
 
 **Tables**:
 
@@ -314,7 +317,7 @@ spark.sql("DELETE FROM logs_raw WHERE pii_fields IS NOT NULL AND timestamp < cur
 
 ### 5. **Vector Database (Semantic Search)** `[IMPLEMENTED — ChromaDB local]`
 
-**Purpose**: 
+**Purpose**:
 - Store embeddings of log messages
 - Enable semantic search ("Find logs similar to this error")
 - Support metadata filtering (by severity, source, date, etc.)
@@ -376,7 +379,7 @@ results = vector_db.search(
 
 ### 6. **GenAI Analysis Engine (LangGraph + Gemini)** `[IMPLEMENTED]`
 
-**Purpose**: 
+**Purpose**:
 - Answer natural language questions about logs
 - Perform root cause analysis and summarization
 - Detect anomalies and suggest remediation
@@ -477,7 +480,7 @@ os.environ["LANGCHAIN_PROJECT"] = "genai-log-analyzer"
 
 ### 7. **FastAPI Query Interface (Cloud Run)** `[IMPLEMENTED]`
 
-**Purpose**: 
+**Purpose**:
 - Expose RESTful API for log search, analysis, and audit
 - Manage authentication (OAuth 2.0, API keys)
 - Apply rate limiting and RBAC
@@ -613,7 +616,7 @@ curl -X GET 'https://api.genai-logs.example.com/audit-trail?user=analyst-01&date
 
 ### 8. **Observability & Audit (LangSmith, Cloud Logging, Kibana)** `[PLANNED]`
 
-**Purpose**: 
+**Purpose**:
 - Monitor all components (latency, throughput, errors)
 - Trace requests end-to-end
 - Audit all queries and data access for compliance
@@ -650,7 +653,7 @@ curl -X GET 'https://api.genai-logs.example.com/audit-trail?user=analyst-01&date
 **Example Log Queries**:
 ```sql
 -- Find slow searches (>2s latency)
-resource.type="cloud_run_revision" AND 
+resource.type="cloud_run_revision" AND
 jsonPayload.operation="/search" AND
 jsonPayload.latency_ms > 2000
 

@@ -32,7 +32,16 @@ jobs:
         run: uv run python -m py_compile api/main.py
       # The spaCy model is not installed in CI, so redactor tests run in rules-only mode.
       - name: Test
-        run: uv run pytest test_api_endpoints.py test_audit.py test_redactor.py test_error_spike.py test_auth_rate_limit.py -q
+        run: uv run pytest test_api_endpoints.py test_audit.py test_redactor.py test_error_spike.py test_auth_rate_limit.py test_format_profiles.py -q
+      # Chroma's default embedding model (ONNX MiniLM) downloads on first use; cache it between runs.
+      - name: Cache Chroma embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/chroma
+          key: chroma-onnx-minilm-v1
+      # No LLM and no API key: checks that each eval case retrieves its expected runbook.
+      - name: Triage retrieval eval
+        run: uv run python scripts/eval_triage.py --retrieval-only --min-pass 1.0
 
   build_and_push:
     needs: test

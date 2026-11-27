@@ -607,6 +607,8 @@ class QueryRequest(BaseModel):
     # Exact match per field; a list matches any of its values. Values compare as strings.
     filters: Dict[str, Union[FilterValue, List[FilterValue]]] = Field(default_factory=dict, max_length=20)
     group_by: List[str] = Field(default_factory=list, max_length=5)
+    # Numeric field (e.g. http_duration_ms): adds avg/p50/p95/p99/max per row.
+    metric: Optional[str] = Field(default=None, max_length=100)
     last_minutes: Optional[int] = Field(default=None, gt=0, le=525600)
     start: Optional[datetime] = None
     end: Optional[datetime] = None
@@ -616,7 +618,7 @@ class QueryRequest(BaseModel):
 @limiter.limit(rate_limit_default)
 async def query_logs(request: Request, body: QueryRequest, user: User = Depends(require_scope("logs:search"))):
     """Exact counts over stored logs (API and Spark tables), e.g. 500s by customer_id in the last 15 minutes."""
-    bad = [f for f in [*body.filters, *body.group_by] if not re.match(_FIELD, f)]
+    bad = [f for f in [*body.filters, *body.group_by, *([body.metric] if body.metric else [])] if not re.match(_FIELD, f)]
     if bad:
         raise HTTPException(status_code=400, detail=f"Invalid field names: {bad}")
     if body.last_minutes is not None and body.start is not None:
@@ -629,7 +631,7 @@ async def query_logs(request: Request, body: QueryRequest, user: User = Depends(
     end = end.tz_localize("UTC") if end is not None and end.tzinfo is None else end
     request.state.audit_detail = _audit_text(json.dumps(body.model_dump(mode="json"), sort_keys=True))
     result = await asyncio.to_thread(
-        orchestrator.storage.aggregate, body.filters, body.group_by, start, end, body.limit
+        orchestrator.storage.aggregate, body.filters, body.group_by, start, end, body.limit, body.metric
     )
     request.state.results_count = len(result["rows"])
     return result

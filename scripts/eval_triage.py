@@ -2,6 +2,7 @@
 
   uv run python scripts/eval_triage.py                       # scripts/eval_triage_cases.yaml
   uv run python scripts/eval_triage.py --cases my.yaml --out report.json --min-pass 0.8
+  uv run python scripts/eval_triage.py --retrieval-only      # no LLM, no key: the retrieval check only (CI)
 
 Seeds the case file's documents into a throwaway knowledge base, runs the analyzer on each
 incident and checks the answer. Needs GEMINI_API_KEY (the free tier is enough; --delay paces calls).
@@ -26,6 +27,8 @@ import sys
 import tempfile
 import time
 from typing import Any, Dict, List
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for `core`
 
 CHECKS = ("ok", "retrieved", "cited", "no_misuse", "severity", "keywords")
 _DEFAULT_CASES = os.path.join(os.path.dirname(__file__), "eval_triage_cases.yaml")
@@ -74,19 +77,29 @@ def grade(case: Dict[str, Any], analysis: Dict[str, Any], titles: List[str]) -> 
     }
 
 
+def grade_retrieval(case: Dict[str, Any], references: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Retrieval only: did the knowledge base hand the model every expected document?"""
+    expected = list(case.get("expected_docs") or [])
+    retrieved = [r.get("title") for r in references]
+    ok = all(t in retrieved for t in expected)
+    return {"case": case.get("name"), "passed": ok, "checks": {"retrieved": ok},
+            "retrieved": retrieved, "missing": [t for t in expected if t not in retrieved]}
+
+
 def summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     n = len(results) or 1
+    # Retrieval-only results carry just the "retrieved" check.
+    names = [c for c in CHECKS if results and all(c in r["checks"] for r in results)]
     return {
         "cases": len(results),
         "pass_rate": sum(r["passed"] for r in results) / n,
-        "check_rates": {c: sum(r["checks"][c] for r in results) / n for c in CHECKS},
+        "check_rates": {c: sum(r["checks"][c] for r in results) / n for c in names},
     }
 
 
-def run(cases_path: str, delay: float) -> List[Dict[str, Any]]:
+def run(cases_path: str, delay: float, retrieval_only: bool = False) -> List[Dict[str, Any]]:
     import yaml
-    from core.analyzers.gemini_incident_triage import GeminiIncidentTriageAnalyzer
-    from core.knowledge import KnowledgeBase
+    from core.knowledge import KnowledgeBase, incident_query
 
     with open(cases_path, encoding="utf-8") as f:
         spec = yaml.safe_load(f)
@@ -96,6 +109,11 @@ def run(cases_path: str, delay: float) -> List[Dict[str, Any]]:
         for doc in spec.get("documents") or []:
             kb.add(doc["kind"], doc["title"], doc["content"], services=doc.get("services"))
         titles = [d["title"] for d in spec.get("documents") or []]
+        if retrieval_only:
+            # Same query and limit as GeminiIncidentTriageAnalyzer; no LLM and no API key.
+            return [grade_retrieval(c, kb.search(incident_query(c["incident"]), limit=3))
+                    for c in spec.get("cases") or []]
+        from core.analyzers.gemini_incident_triage import GeminiIncidentTriageAnalyzer
         analyzer = GeminiIncidentTriageAnalyzer(knowledge=kb)
         for i, case in enumerate(spec.get("cases") or []):
             if i and delay:
@@ -111,11 +129,13 @@ def main() -> None:
     p.add_argument("--out", default="", help="write the full JSON report here")
     p.add_argument("--min-pass", type=float, default=0.8, help="exit 1 below this pass rate")
     p.add_argument("--delay", type=float, default=4.0, help="seconds between LLM calls")
+    p.add_argument("--retrieval-only", action="store_true",
+                   help="check only that the right documents are retrieved; no LLM call, no API key")
     args = p.parse_args()
 
     from dotenv import load_dotenv
     load_dotenv()
-    results = run(args.cases, args.delay)
+    results = run(args.cases, args.delay, retrieval_only=args.retrieval_only)
     for r in results:
         failed = [c for c, v in r["checks"].items() if not v]
         print(f"{'PASS' if r['passed'] else 'FAIL'}  {r['case']}" + (f"  failed: {', '.join(failed)}" if failed else ""))

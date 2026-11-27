@@ -21,6 +21,20 @@ def _text(value: Any) -> Optional[str]:
     return str(value)
 
 
+def _metric_stats(field: str, values: pd.Series) -> Dict[str, Any]:
+    """Percentiles use linear interpolation (pandas default). Non-numeric values were already dropped."""
+    v = values.dropna()
+    v = v[~v.isin([float("inf"), float("-inf")])]
+    if v.empty:
+        return {"field": field, "n": 0, "avg": None, "p50": None, "p95": None, "p99": None, "max": None}
+    q = v.quantile([0.5, 0.95, 0.99])
+    return {
+        "field": field, "n": int(len(v)), "avg": round(float(v.mean()), 3),
+        "p50": round(float(q[0.5]), 3), "p95": round(float(q[0.95]), 3),
+        "p99": round(float(q[0.99]), 3), "max": float(v.max()),
+    }
+
+
 def _json_obj(value: Any) -> Dict[str, Any]:
     try:
         parsed = json.loads(value) if isinstance(value, str) else None
@@ -135,13 +149,18 @@ class DeltaLakeStorage:
         start: Optional[pd.Timestamp] = None,
         end: Optional[pd.Timestamp] = None,
         limit: int = 100,
+        metric: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Count logs matching exact-value `filters` (a list value means any of), grouped by `group_by`.
 
         Values are compared as strings, so 500 matches "500". Rows without a parseable
-        timestamp are dropped when `start` or `end` is given."""
+        timestamp are dropped when `start` or `end` is given.
+
+        With `metric` (a numeric field such as a request duration), each row also gets
+        `metric`: {field, n, avg, p50, p95, p99, max} over the rows whose value is a number.
+        Rows without a number are counted in `count` but not in `n`."""
         filters, group_by = filters or {}, group_by or []
-        columns = list(dict.fromkeys(["timestamp", *filters, *group_by]))
+        columns = list(dict.fromkeys(["timestamp", *filters, *group_by, *([metric] if metric else [])]))
         df = self.query_logs(columns=columns)
         scanned = len(df)
         if df.empty:
@@ -163,14 +182,26 @@ class DeltaLakeStorage:
             df = df[df[col].map(_text).isin(wanted)]
 
         total = len(df)
+        values = pd.to_numeric(df[metric], errors="coerce") if metric else None
         if not group_by:
-            return {"rows": [{"count": total}], "total": total, "scanned": scanned}
+            row: Dict[str, Any] = {"count": total}
+            if metric:
+                row["metric"] = _metric_stats(metric, values)
+            return {"rows": [row], "total": total, "scanned": scanned}
         keys = pd.DataFrame({g: df[g].map(_text) for g in group_by})
         counts = keys.groupby(group_by, dropna=False).size().sort_values(ascending=False, kind="stable").head(limit)
+        stats = {}
+        if metric:
+            keys["_metric"] = values
+            stats = {(k if isinstance(k, tuple) else (k,)): sub["_metric"]
+                     for k, sub in keys.groupby(group_by, dropna=False)}
         rows = []
         for key, n in counts.items():
             key = key if isinstance(key, tuple) else (key,)
-            rows.append({**{g: None if pd.isna(k) else k for g, k in zip(group_by, key)}, "count": int(n)})
+            row = {**{g: None if pd.isna(k) else k for g, k in zip(group_by, key)}, "count": int(n)}
+            if metric:
+                row["metric"] = _metric_stats(metric, stats[key])
+            rows.append(row)
         return {"rows": rows, "total": total, "scanned": scanned}
 
     def get_history(self):
