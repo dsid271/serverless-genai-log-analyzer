@@ -7,8 +7,9 @@ Each Kafka value goes through the same bricks as the API path: format profile
 from __future__ import annotations
 
 import json
+import math
 import os
-from typing import Any, Dict, Iterable, Iterator, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from processing.format_profiles import DEFAULT_PROFILE, get_normalizer
 from processing.log_pattern import message_pattern, pattern_id
@@ -31,7 +32,30 @@ COLUMNS = {
     "redaction_mode": "string",
     "record": "string",
     "trace_id": "string",
+    "duration_ms": "double",
 }
+
+# First numeric field found is the request latency; OTLP attributes arrive with dots as underscores.
+DEFAULT_LATENCY_FIELDS = "duration_ms,latency_ms,response_time_ms,elapsed_ms,http_duration_ms"
+
+
+def latency_fields_from_env() -> List[str]:
+    raw = os.getenv("SPARK_LATENCY_FIELDS") or DEFAULT_LATENCY_FIELDS
+    return [f.strip() for f in raw.split(",") if f.strip()]
+
+
+def latency_ms(record: Dict[str, Any], fields: List[str]) -> Optional[float]:
+    for name in fields:
+        value = record.get(name)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            ms = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(ms) and ms >= 0:
+            return ms
+    return None
 
 
 def format_profile_from_env() -> str:
@@ -48,6 +72,7 @@ class RecordProcessor:
                              f"available: {self.normalizer.names()}")
         self.redactor = LogRedactor(profile=pii_profile or os.getenv("REDACTOR_PROFILE", "financial"),
                                     use_ner=False)
+        self.latency_fields = latency_fields_from_env()
 
     @staticmethod
     def _decode(value: Any) -> Optional[Dict[str, Any]]:
@@ -82,6 +107,7 @@ class RecordProcessor:
             "redaction_mode": str(clean.get("redaction_mode", "")),
             "record": json.dumps(clean, default=str),
             "trace_id": str(clean["trace_id"]) if clean.get("trace_id") else None,
+            "duration_ms": latency_ms(clean, self.latency_fields),
         }
 
 
@@ -101,4 +127,5 @@ def process_frames(frames: Iterable[Any]) -> Iterator[Any]:
     for frame in frames:
         rows = [row for row in (_PROCESSOR.process(v, ts)
                                 for v, ts in zip(frame["value"], frame["kafka_ts"])) if row]
-        yield pd.DataFrame(rows, columns=list(COLUMNS)).astype({"is_error": bool, "contains_pii": bool})
+        yield pd.DataFrame(rows, columns=list(COLUMNS)).astype(
+            {"is_error": bool, "contains_pii": bool, "duration_ms": float})

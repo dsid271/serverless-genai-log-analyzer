@@ -1,5 +1,6 @@
 """Consumes spike candidates from the Spark job (Kafka topic incident-candidates)
-and raises them through the existing triage pipeline as `error_spike` incidents."""
+and raises them through the existing triage pipeline as `error_spike` or
+`latency_spike` incidents (the candidate's `kind`, default `error_spike`)."""
 from __future__ import annotations
 
 import asyncio
@@ -48,18 +49,41 @@ class CandidateHandler:
             "trace_ids": [str(t) for t in (c.get("trace_ids") or []) if t],
         }
 
+    def _latency_details(self, c: Dict[str, Any]) -> Dict[str, Any]:
+        source = str(c.get("source") or "unknown")
+        count = int(c.get("count") or 0)
+        return {
+            "origin": "spark",
+            "window_start": c.get("window_start"),
+            "window_end": c.get("window_end"),
+            "latency_threshold_ms": c.get("threshold"),
+            "baseline_p95_ms": c.get("baseline"),
+            "reason": c.get("reason", "threshold"),
+            "count": count,
+            **{k: c.get(k) for k in ("p50_ms", "p95_ms", "p99_ms", "max_ms")},
+            "samples": [str(c["sample"])[:200]] if c.get("sample") else [],
+            "sources": [source],
+            "source_counts": {source: count},
+            "trace_ids": [str(t) for t in (c.get("trace_ids") or []) if t],
+        }
+
     async def __call__(self, candidates: List[Dict[str, Any]]) -> None:
         for c in candidates:
-            key = (c.get("source"), c.get("window_start"))
+            kind = c.get("kind") or "error_spike"
+            key = (kind, c.get("source"), c.get("window_start"))
             if key in self._seen:
                 continue
-            details = self._details(c)
+            if kind == "latency_spike":
+                details = self._latency_details(c)
+                message = (f"Latency spike detected: p95 {details['p95_ms']} ms from {details['sources'][0]}"
+                           f" in window starting {details['window_start']}")
+            else:
+                kind = "error_spike"
+                details = self._details(c)
+                message = (f"Error spike detected: {details['count']} errors from {details['sources'][0]}"
+                           f" in window starting {details['window_start']}")
             inc, is_new = await asyncio.to_thread(
-                self._triage.raise_incident,
-                kind="error_spike",
-                message=(f"Error spike detected: {details['count']} errors from {details['sources'][0]}"
-                         f" in window starting {details['window_start']}"),
-                details=details,
+                self._triage.raise_incident, kind=kind, message=message, details=details,
             )
             self._seen[key] = None
             while len(self._seen) > self._max_seen:

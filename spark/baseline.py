@@ -6,6 +6,9 @@ Until a source has `warmup` finished windows, the fixed `threshold` applies inst
 
 Windows are fed in as they update (Spark "update" mode). A window joins the baseline once a
 later window for the same source arrives; windows with no errors in between count as zero.
+
+The compared value is `value_key` (default `count`). The latency query uses `p95_ms` with
+`fill_gaps=False`: a window without requests says nothing about latency, so it is skipped.
 """
 from __future__ import annotations
 
@@ -20,19 +23,21 @@ class _SourceState:
     mean: float = 0.0
     windows: int = 0
     last_closed: Optional[float] = None      # start (epoch s) of the newest window in the mean
-    pending: Dict[float, int] = field(default_factory=dict)   # open window start -> latest count
+    pending: Dict[float, float] = field(default_factory=dict)   # open window start -> latest value
 
 
 class SpikeBaseline:
-    def __init__(self, threshold: int, factor: float = 3.0, min_count: int = 5,
+    def __init__(self, threshold: float, factor: float = 3.0, min_count: float = 5,
                  alpha: float = 0.2, warmup: int = 5, state_path: Optional[str] = None,
-                 max_published: int = 10_000):
+                 max_published: int = 10_000, value_key: str = "count", fill_gaps: bool = True):
         self.threshold = threshold
         self.factor = factor
         self.min_count = min_count
         self.alpha = alpha
         self.warmup = warmup
         self.state_path = state_path
+        self.value_key = value_key
+        self.fill_gaps = fill_gaps
         self._sources: Dict[str, _SourceState] = {}
         self._published: Dict[Tuple[str, float], None] = {}
         self._max_published = max_published
@@ -57,8 +62,8 @@ class SpikeBaseline:
         s = self._sources.get(source)
         return s.mean if s and s.windows >= self.warmup else None
 
-    def _close(self, s: _SourceState, start: float, count: int, length: float) -> None:
-        if s.last_closed is not None and length > 0:
+    def _close(self, s: _SourceState, start: float, count: float, length: float) -> None:
+        if self.fill_gaps and s.last_closed is not None and length > 0:
             gaps = int(round((start - s.last_closed) / length)) - 1
             for _ in range(min(max(gaps, 0), 1000)):
                 s.mean *= (1 - self.alpha)
@@ -67,7 +72,7 @@ class SpikeBaseline:
         s.windows += 1
         s.last_closed = start
 
-    def _observe(self, source: str, start: float, count: int, length: float) -> None:
+    def _observe(self, source: str, start: float, count: float, length: float) -> None:
         s = self._sources.setdefault(source, _SourceState())
         if s.last_closed is not None and start <= s.last_closed:
             return                                       # late update to a window already in the mean
@@ -76,11 +81,11 @@ class SpikeBaseline:
             self._close(s, older, s.pending.pop(older), length)
 
     def evaluate(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """rows: source, start, end (epoch s), count, plus any extra fields.
+        """rows: source, start, end (epoch s), `value_key`, plus any extra fields.
         Returns rows to publish, each with `threshold`, `baseline` and `reason` added."""
         out = []
         for r in sorted(rows, key=lambda r: (r["source"], r["start"])):
-            source, start, count = r["source"], float(r["start"]), int(r["count"])
+            source, start, count = r["source"], float(r["start"]), float(r[self.value_key])
             self._observe(source, start, count, float(r["end"]) - start)
             base = self.baseline(source) if self.enabled else None
             if base is None:

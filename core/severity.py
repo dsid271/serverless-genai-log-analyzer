@@ -42,10 +42,15 @@ def score_incident(
         if points:
             factors.append({"factor": name, "points": points, "detail": detail})
 
-    count = int(details.get("count") or 0)
-    threshold = max(int(details.get("threshold") or 1), 1)
-    ratio = count / threshold
-    add("volume", min(30, int(10 * ratio)), f"{count} errors vs threshold {threshold}")
+    if details.get("p95_ms") is not None:
+        p95 = float(details["p95_ms"])
+        limit = max(float(details.get("latency_threshold_ms") or 1), 1.0)
+        add("latency", min(30, int(10 * p95 / limit)), f"p95 {p95:g} ms vs threshold {limit:g} ms")
+    else:
+        count = int(details.get("count") or 0)
+        threshold = max(int(details.get("threshold") or 1), 1)
+        ratio = count / threshold
+        add("volume", min(30, int(10 * ratio)), f"{count} errors vs threshold {threshold}")
 
     critical = int(details.get("critical_count") or 0)
     if critical:
