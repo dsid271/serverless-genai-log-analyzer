@@ -1,8 +1,9 @@
 # processing/format_profiles.yaml
 #
 # Log-format profiles: map a platform's own field names onto the internal
-# schema (timestamp, severity, source, message) BEFORE redaction, storage and
-# detection. PII redaction rules live separately in pii_profiles.yaml.
+# schema (timestamp, severity, source, message, trace_id) BEFORE redaction, storage
+# and detection. PII redaction rules live separately in pii_profiles.yaml.
+# trace_id is optional; incidents whose errors share a trace id are grouped across services.
 #
 # Per profile:
 #   fields:           canonical field -> candidate paths, first non-empty wins.
@@ -42,6 +43,7 @@ profiles:
       severity: [severity, level, log_level, loglevel, levelname]
       source: [source, service, service_name, app, application]
       message: [message, msg, log, body]
+      trace_id: [trace_id, traceId, trace.id, traceid, dd.trace_id]
     severity_map: *levels
 
   # SIEM HTTP-collector style envelope: epoch `time`, payload under `event`.
@@ -51,6 +53,7 @@ profiles:
       severity: [event.level, event.severity, event.log_level, fields.level]
       source: [event.service, fields.service, sourcetype, source]
       message: [event.message, event.msg, event]
+      trace_id: [event.trace_id, event.traceId, fields.trace_id]
     severity_map: *levels
 
   # Fictional "Acme Insight" analytics platform: underscore-prefixed fields.
@@ -63,6 +66,21 @@ profiles:
     severity_map: *levels
     timestamp_formats: ["%Y-%m-%d %H:%M:%S,%f", "%d/%b/%Y:%H:%M:%S %z"]
 
+  # OTLP logs received at POST /v1/logs, already flattened by processing/otlp.py
+  # (resource attributes become resource_<name>, dots in names become underscores).
+  # Severity uses severityText, else the OTel severityNumber scale.
+  otlp:
+    fields:
+      timestamp: [timeUnixNano, observedTimeUnixNano]
+      severity: [severityText, severityNumber]
+      source: [resource_service_name]
+      message: [body]
+      trace_id: [traceId]
+    severity_map: *levels
+    defaults:
+      severity: INFO
+      source: unknown
+
   # Fictional "Acme AI Platform": OpenTelemetry-style log records.
   # Numeric severities (severityNumber) use the OTel scale automatically:
   # 1-4 trace, 5-8 debug, 9-12 info, 13-16 warn, 17-20 error, 21-24 fatal.
@@ -72,6 +90,7 @@ profiles:
       severity: [severityText, severityNumber]
       source: [resource.attributes.service.name, resource.service.name, service.name]
       message: [body, body.message]
+      trace_id: [traceId, trace_id]
     severity_map: *levels
     defaults:
       severity: INFO

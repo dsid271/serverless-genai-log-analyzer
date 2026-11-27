@@ -8,7 +8,7 @@ from collections import Counter, deque
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from core.event_bus import EventBus
-from core.triage import TriageService
+from core.triage import MAX_TRACE_IDS, TriageService
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +27,8 @@ class ErrorSpikeDetector:
         self._cooldown_seconds = int(os.getenv("ERROR_SPIKE_COOLDOWN_SECONDS", "60"))
         self._last_incident_at: float = 0.0
 
-        # (timestamp, contains_pii, source, severity, malicious_ip, country) per error in the sliding window.
-        self._events: Deque[Tuple[float, bool, str, str, bool, Optional[str]]] = deque()
+        # (timestamp, contains_pii, source, severity, malicious_ip, country, trace_id) per error in the sliding window.
+        self._events: Deque[Tuple[float, bool, str, str, bool, Optional[str], Optional[str]]] = deque()
 
     async def start(self) -> None:
         if self._running:
@@ -69,6 +69,7 @@ class ErrorSpikeDetector:
                 str(event.get("severity", "")).upper(),
                 any(v is True for k, v in event.items() if k.endswith("_malicious")),
                 event.get("source_ip_country"),
+                str(event["trace_id"]) if event.get("trace_id") else None,
             ))
             self._samples.append(str(event.get("message", ""))[:200])
 
@@ -99,6 +100,8 @@ class ErrorSpikeDetector:
             "source_counts": dict(source_counts),
             "malicious_ip_count": sum(1 for e in self._events if e[4]),
             "top_countries": dict(countries.most_common(5)),
+            # Most recent first; triage groups incidents across services on a shared trace id.
+            "trace_ids": list(dict.fromkeys(e[6] for e in reversed(self._events) if e[6]))[:MAX_TRACE_IDS],
         }
 
         # SQLite work runs in a thread so it never stalls the API's event loop.

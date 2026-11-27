@@ -11,10 +11,13 @@ services:
     volumes:
       - .:/app
       - ./processing/pii_profiles.yaml:/app/processing/pii_profiles.yaml
+      # Read-only view of the Spark job's Delta table so /summary and /query cover both paths.
+      - spark-data:/spark-data:ro
     environment:
       - PYTHONUNBUFFERED=1
       - CHROMA_PATH=/app/data/chroma
       - DELTA_LAKE_PATH=/app/data/delta-lake
+      - DELTA_LAKE_READ_PATHS=/spark-data/delta-lake/logs_stream
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       # Load tests: set LOADTEST_PII_DB=/app/data/loadtest_pii.sqlite3 (for api and spark) so the
       # NER pass on synthetic logs does not write rules into the real learned-PII DB.

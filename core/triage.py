@@ -2,6 +2,10 @@
 Incident triage: grouping (noise reduction), severity scoring, ownership
 routing, deployment correlation and operator feedback.
 
+Hits are grouped into an open incident of the same kind seen within the group
+window when they share a source or a trace id (`details.trace_ids`), so one
+failing request path across services becomes one incident.
+
 Detectors call `raise_incident`; the analyzer runner calls `attach_analysis`.
 Resolving an incident with a note indexes it as a postmortem in the knowledge
 base, so later triage can retrieve it. Every saved change is passed to
@@ -26,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 VERDICTS = ("confirmed", "false_positive", "resolved", "reopen")
 _VERDICT_STATUS = {"false_positive": "false_positive", "resolved": "resolved", "reopen": "open"}
+# Trace ids kept per incident; enough to link services without growing the row unbounded.
+MAX_TRACE_IDS = 50
 
 
 def _env_int(name: str, default: int) -> int:
@@ -55,7 +61,7 @@ class TriageService:
         Returns (incident, is_new)."""
         now = time.time()
         sources = set(details.get("sources") or [])
-        match = self._find_group(kind, sources, now)
+        match = self._find_group(kind, sources, set(details.get("trace_ids") or []), now)
         if match is None:
             inc = Incident.new(kind, message, details, now=now)
             is_new = True
@@ -78,11 +84,13 @@ class TriageService:
             except Exception:
                 logger.exception("on_change hook failed for %s", inc.id)
 
-    def _find_group(self, kind: str, sources: set, now: float) -> Optional[Incident]:
+    def _find_group(self, kind: str, sources: set, trace_ids: set, now: float) -> Optional[Incident]:
         if self.group_window <= 0:
             return None
         for inc in self.store.find_open(kind=kind, since=now - self.group_window):
             if sources & set(inc.details.get("sources") or []):
+                return inc
+            if trace_ids & set(inc.details.get("trace_ids") or []):
                 return inc
         return None
 
@@ -99,6 +107,9 @@ class TriageService:
         merged["malicious_ip_count"] = max(
             int(old.get("malicious_ip_count") or 0), int(new.get("malicious_ip_count") or 0)
         )
+        traces = list(dict.fromkeys([*(new.get("trace_ids") or []), *(old.get("trace_ids") or [])]))
+        if traces:
+            merged["trace_ids"] = traces[:MAX_TRACE_IDS]
         return merged
 
     # --- scoring / routing / correlation --------------------------------

@@ -93,9 +93,11 @@ def window_counts(logs, window: str, watermark: str):
             F.max(F.col("contains_pii").cast("int")).alias("pii"),
             F.approx_count_distinct("pattern_id").alias("patterns"),
             F.first("message", ignorenulls=True).alias("sample"),
+            # Same cap as core.triage.MAX_TRACE_IDS.
+            F.slice(F.collect_set("trace_id"), 1, 50).alias("trace_ids"),
         )
         .select("source", F.unix_timestamp("w.start").alias("start"), F.unix_timestamp("w.end").alias("end"),
-                "count", "critical_count", "pii", "patterns", "sample")
+                "count", "critical_count", "pii", "patterns", "sample", "trace_ids")
     )
 
 
@@ -115,6 +117,7 @@ def candidate_payload(row: dict) -> dict:
         "contains_pii": row.get("pii") == 1,
         "patterns": row.get("patterns"),
         "sample": row.get("sample"),
+        "trace_ids": list(row.get("trace_ids") or []),
         "threshold": row["threshold"],
         "baseline": row["baseline"],
         "reason": row["reason"],
@@ -137,12 +140,18 @@ def spike_publisher(baseline: SpikeBaseline, bootstrap: str, topic: str):
 
 
 def _ensure_table(spark, path: str) -> None:
-    """The spikes query streams from the Delta table, so it must exist before data arrives."""
+    """The spikes query streams from the Delta table, so it must exist (with every column
+    in COLUMNS) before data arrives. Columns added to COLUMNS later are added in place."""
+    fields = [f for f in processed_schema().fields if f.name != "kafka_ts"]
     if os.path.isdir(os.path.join(path, "_delta_log")):
+        existing = set(spark.read.format("delta").load(path).columns)
+        missing = [f for f in fields if f.name not in existing]
+        if missing:
+            cols = ", ".join(f"{f.name} {f.dataType.simpleString()}" for f in missing)
+            spark.sql(f"ALTER TABLE delta.`{path}` ADD COLUMNS ({cols})")
         return
     from pyspark.sql.types import DateType, StructField, StructType, TimestampType
 
-    fields = [f for f in processed_schema().fields if f.name != "kafka_ts"]
     schema = StructType(fields + [StructField("event_time", TimestampType()), StructField("date", DateType())])
     spark.createDataFrame([], schema).write.format("delta").partitionBy("date", "source").save(path)
 

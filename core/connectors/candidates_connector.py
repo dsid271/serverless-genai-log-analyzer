@@ -45,6 +45,7 @@ class CandidateHandler:
             "samples": [str(c["sample"])[:200]] if c.get("sample") else [],
             "sources": [source],
             "source_counts": {source: count},
+            "trace_ids": [str(t) for t in (c.get("trace_ids") or []) if t],
         }
 
     async def __call__(self, candidates: List[Dict[str, Any]]) -> None:

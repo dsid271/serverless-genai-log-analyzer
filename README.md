@@ -4,7 +4,7 @@
 
 This project is a local-first prototype of a **Generative AI-powered Network Log Analyzer**: it ingests logs, redacts PII, stores them, raises incidents on error spikes, and (optionally) uses an LLM to summarize and triage those incidents. It works end to end, but it is a prototype, not a production system. See [Known Limitations](#known-limitations).
 
-A **FastAPI** backend orchestrates the **Gemini API** via **LangChain/LangGraph**. The app is containerized with **Docker**, and the image is compatible with serverless platforms such as **Google Cloud Run**. No live deployment is maintained, and Cloud Run deployment is not automated.
+A **FastAPI** backend orchestrates the **Gemini API** via **LangChain/LangGraph**. The app is containerized with **Docker**, and the image runs on serverless platforms such as **Google Cloud Run**. "Serverless" here describes the container, not the data: the API keeps its state (SQLite, Delta Lake, Chroma) on local disk, so it is designed to run self-hosted with mounted volumes (`./data` and the `spark-data` volume in `docker-compose.yml`). A truly stateless serverless deployment would need object storage and a managed database, which this project does not implement. No live deployment is maintained, and Cloud Run deployment is not automated.
 
 **Continuous Integration** runs on **GitHub Actions**: on every push to `main` it runs `ruff`, a `py_compile` import check on `api/main.py`, and the pytest suite (see [Testing](#testing)), then builds and publishes a Docker image to the GitHub Container Registry (GHCR). There is no Continuous Deployment.
 
@@ -16,7 +16,7 @@ On-call engineers face thousands of near-identical log lines that often contain 
 
 ## Implemented Now (MVP)
 
-- **FastAPI API** with `GET /`, `POST /ingest`, `POST /analyze`, `GET /plugins`, `GET /incidents`, `GET /incidents/{id}`, `POST /incidents/{id}/feedback`, `GET /feedback`, `POST /events/deployments`, `GET /deployments`, `POST|GET /knowledge`, `DELETE /knowledge/{id}`, `POST /search`, `GET /summary`, `GET /audit-trail`, `GET /metrics`, `GET /admin/integrations`
+- **FastAPI API** with `GET /`, `POST /ingest`, `POST /v1/logs` (OTLP/HTTP JSON), `POST /analyze`, `GET /plugins`, `GET /incidents`, `GET /incidents/{id}`, `POST /incidents/{id}/feedback`, `GET /feedback`, `POST /events/deployments`, `GET /deployments`, `POST|GET /knowledge`, `DELETE /knowledge/{id}`, `POST /search`, `POST /query`, `GET /summary`, `GET /audit-trail`, `GET /metrics`, `GET /admin/integrations`
 - **Modular plugin system** via `ENABLED_CONNECTORS`, `ENABLED_DETECTORS`, `ENABLED_ANALYZERS`
 - **Plugin loading** via `PLUGIN_MODULES` (derived-image friendly)
 - **Error-spike detection** (`error_spike`) that raises incidents into a **SQLite incident store** (`INCIDENTS_DB`), with analyzer outputs attached
@@ -27,23 +27,24 @@ On-call engineers face thousands of near-identical log lines that often contain 
 - **IP enrichment** (see [Enrichment](#enrichment)): GeoLite2 country and AbuseIPDB reputation for public IPs; malicious IPs raise severity
 - **Ticketing** (see [Ticketing](#ticketing)): PagerDuty, ServiceNow and a signed generic webhook, opened/updated/resolved from incident changes
 - **OWASP Top 10 / CWE reference docs** seeded into the knowledge base by `scripts/load_owasp_cwe.py`
+- **Exact counts and latency percentiles** (`POST /query`): filter and group stored logs by any field, and add `"metric": "<numeric field>"` (for example `http_duration_ms` from OTLP attributes) to get `n`, `avg`, `p50`, `p95`, `p99` and `max` per group. Percentiles are linearly interpolated and computed over the rows where the field is a number; the whole table is read per request
 - **API-key issuance**: keys stored in SQLite (hashed), issued per profile with scopes and expiry, revocable via CLI or `/admin/keys`
 
 ## Known Limitations
 
-- **Detection is a static threshold**: one detector counts `ERROR`/`CRITICAL` logs in a sliding window. There is no learned baseline and no prediction. Grouping joins hits that share a source within `INCIDENT_GROUP_WINDOW_SECONDS`; it does not detect causal links between services.
+- **Detection is a static threshold**: one detector counts `ERROR`/`CRITICAL` logs in a sliding window. There is no learned baseline and no prediction. Grouping joins hits that share a source or a `trace_id` within `INCIDENT_GROUP_WINDOW_SECONDS`. Services whose errors carry no common trace id are not linked; there is no service dependency graph.
 - **Severity weights are hand-set**: the factors in `core/severity.py` are not fitted to historical data. Feedback is stored (`GET /feedback`) but nothing retrains on it yet; false positives only lower the score of later incidents on the same service.
-- **LLM triage is unverified**: there is no correctness measurement. Retrieved runbooks/postmortems are listed under `references` in each analysis, but the model's use of them is not checked.
+- **LLM triage eval is small**: `scripts/eval_triage.py` runs `gemini_triage` on the cases in `scripts/eval_triage_cases.yaml` and checks retrieval, that the answer cites the expected runbook and no other, severity and keywords. Five fictional cases, matched on titles and keywords; it is not a measure of accuracy on real incidents.
 - **Routing is a static file**: `config/ownership.yaml` is read at startup. There is no on-call schedule. PagerDuty and ServiceNow tickets are sent, but routing keys and assignment groups are mapped per team through env vars, not synced from those systems.
-- **Ticketing is not verified against live providers**: the dispatcher and webhook signing are unit-tested with fakes; no real PagerDuty or ServiceNow instance was called.
+- **Ticketing is partly verified against live providers**: ServiceNow ticket creation was tested against a developer instance. PagerDuty has not been called live; the dispatcher and webhook signing are unit-tested with fakes.
 - **No remediation**: no automated actions.
 - **Enrichment is limited**: GeoIP country and AbuseIPDB reputation only. There is no CMDB lookup. AbuseIPDB's free tier (1,000 checks/day) caps how many new IPs are checked.
 - **PII redaction quality is not measured**: there is no evaluation set. Without the spaCy model it runs in rules-only mode and will not catch names.
-- **Storage is local disk** (`./data/delta-lake`, `./data/chroma`), so it is ephemeral on serverless platforms.
+- **Storage is local disk** (`./data/delta-lake`, `./data/chroma`, SQLite files under `./data`). This is deliberate, to keep the project free to run (see the Abstract). It survives restarts when `./data` is a mounted volume, but is lost on serverless platforms that give containers ephemeral disk. Back it up with `scripts/backup.py` (see [Backup and restore](#backup-and-restore-local-no-cloud-account)); a real transfer to a remote has not been rehearsed.
 - **Auth is off by default** (`ENABLE_AUTH=false`).
-- **Verified end to end (local, 2026-10-12)**: Kafka → Spark → API → incident through the `spark_candidates` connector, and the Prometheus/Grafana stack, with ticket dispatch off. **Not verified**: ticketing (PagerDuty, ServiceNow and webhook are only tested with fakes) and the API's own `kafka` log connector under load.
+- **Verified end to end (local, 2026-10-12)**: Kafka → Spark → API → incident through the `spark_candidates` connector, and the Prometheus/Grafana stack, with ticket dispatch off. **Not verified**: PagerDuty and webhook ticketing (tested with fakes only; ServiceNow ticket creation was tested live) and the API's own `kafka` log connector under load.
 - **No fallbacks**: if the redactor, Delta Lake, or Chroma cannot start, the API refuses to start. Without `GEMINI_API_KEY`, `POST /analyze` returns 503.
-- **Test coverage is thin**: 84 tests cover the API, auth and rate limiting, key issuance, audit logger, redactor, error-spike detector, triage, ticket dispatch, webhook signing and IP enrichment. There are no tests for the Kafka connector, analyzers, or the LLM path.
+- **Test coverage is partial**: over 100 tests cover the API, auth and rate limiting, key issuance, audit logger, redactor, detector, triage, ticket dispatch, webhook signing, IP enrichment, OTLP ingestion, `/query`, the Kafka consumer and connector (fake aiokafka objects, no broker), and `gemini_triage` (fake Gemini client). No test talks to a real Kafka broker, Gemini or PagerDuty, and the Spark job itself is only tested through its pure-Python parts.
 
 ## System Architecture
 
@@ -237,7 +238,7 @@ Built-ins:
 
 Implemented in `core/triage.py`. Each detector hit goes through these steps:
 
-1. **Grouping**: a hit that shares a source with an open incident of the same kind, seen within `INCIDENT_GROUP_WINDOW_SECONDS` (default 900, `0` disables), updates that incident (`occurrences`, `last_seen`, merged sources) instead of creating a new one.
+1. **Grouping**: a hit that shares a source or a trace id (`details.trace_ids`, from the logs' `trace_id` field) with an open incident of the same kind, seen within `INCIDENT_GROUP_WINDOW_SECONDS` (default 900, `0` disables), updates that incident (`occurrences`, `last_seen`, merged sources) instead of creating a new one.
 2. **Routing**: the source with the most errors picks the owning team from `config/ownership.yaml` (`OWNERSHIP_FILE`; fnmatch patterns). Other owning teams are listed in `also_affected`. Unmatched sources go to `default_team`.
 3. **Deployment correlation**: deployments to affected services from `DEPLOY_CORRELATION_WINDOW_SECONDS` (default 1800) before the incident started up to its last error are attached. A deployment webhook that arrives late re-links open incidents.
 4. **Severity**: `core/severity.py` sums explainable factors into a score (0-100) and a level (`low`/`medium`/`high`/`critical`). The factors are volume vs threshold, CRITICAL logs, number of sources, PII, malicious source IPs (`threat_intel`, +15), service tier, recurrence, recent deployment, the LLM's rating, and prior false positives on the service (negative). Each factor is returned in `severity.factors`. An operator override always wins.
@@ -376,6 +377,7 @@ The opt-in Kafka connector (`core/connectors/kafka_connector.py`) reads JSON log
 - **Opt-in**: set `ENABLED_CONNECTORS=kafka`. It does not start by default.
 - **Fail-safe**: if the broker is not reachable yet, the connector retries in the background and the API still starts.
 - **Manual ingestion**: `POST /ingest` accepts logs over HTTP and needs no broker.
+- **OpenTelemetry logs**: `POST /v1/logs` accepts OTLP/HTTP **JSON** log exports (also gzip). Set `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/json` and `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:8000/v1/logs`; protobuf gets a 415. Records go through the `otlp` format profile, then the same pipeline as `/ingest`. Resource and log attributes are stored as columns with dots turned into underscores (`http.status_code` becomes `http_status_code`), so `/query` can count and group by them. Only logs are accepted: no spans or metrics, so latency that is not written into a log record is not seen. Needs the `logs:ingest` scope when auth is on. Tested with hand-built payloads, not with a real OpenTelemetry SDK.
 
 ### Throughput settings
 
@@ -388,7 +390,7 @@ The opt-in Kafka connector (`core/connectors/kafka_connector.py`) reads JSON log
 
 Different platforms name their fields differently (`_time`, `log_level`, `severityNumber`, nested `resource.service.name`, epoch timestamps). A **format profile** in `processing/format_profiles.yaml` maps those onto the internal fields `timestamp`, `severity`, `source` and `message` before redaction, storage and detection. Records already using the internal names pass through unchanged. PII rules are separate (`pii_profiles.yaml`).
 
-- **Built-in profiles**: `generic` (default), `siem_hec`, `acme_insight`, `acme_ai_platform`. The last two are fictional examples to copy from.
+- **Built-in profiles**: `generic` (default), `siem_hec`, `otlp` (used by `POST /v1/logs`), `acme_insight`, `acme_ai_platform`. The last two are fictional examples to copy from.
 - **Select one**: `LOG_FORMAT_PROFILE` (all channels), `KAFKA_FORMAT_PROFILE` (Kafka only), or `{"format": "acme_insight", "logs": [...]}` on `POST /ingest`. An unknown name returns 400 on the API and stops the Kafka connector from starting.
 - **Onboard a platform**: add a profile with candidate field paths (first non-empty wins), a `severity_map`, optional `timestamp_formats` and `defaults`. No code change. Use `FORMAT_PROFILES_PATH` to load a different file.
 
@@ -421,9 +423,29 @@ docker compose --profile kafka --profile spark up -d kafka spark api
 
 - **Runtime**: one container (the `spark` target of `dockerfile`, Java 21, `local[*]`). The Kafka and Delta jars download on first start and are cached in the `spark-ivy` volume. The Spark UI is on http://localhost:4040.
 - **Shared state**: the container reads `.env` and `./data/learned_pii.sqlite3`. `PII_PSEUDONYM_KEY` must match the api so learned entities apply. Approved PII rule suggestions in the same file apply too.
-- **Delta tables**: in Compose, Spark writes `/spark-data/delta-lake/logs_stream` and its checkpoints in the `spark-data` volume, not in `./data`. Each batch writes many small files, which is slow on a host bind mount (measured on a OneDrive folder: ~150 s lag vs ~50 s in a volume). This table is separate from the api's `data/delta-lake/logs`.
+- **Delta tables**: in Compose, Spark writes `/spark-data/delta-lake/logs_stream` and its checkpoints in the `spark-data` volume, not in `./data`. Each batch writes many small files, which is slow on a host bind mount (measured on a OneDrive folder: ~150 s lag vs ~50 s in a volume). The api writes its own `data/delta-lake/logs` and mounts `spark-data` read-only; `DELTA_LAKE_READ_PATHS` makes `/summary` and `/query` read both tables. Fields outside Spark's fixed columns are read from its `record` JSON column.
 - **Other settings**: `SPARK_TRIGGER` (`10 seconds`), `SPARK_MAX_OFFSETS_PER_TRIGGER` (200000), `SPARK_KAFKA_MIN_PARTITIONS` (number of cores), `SPARK_STARTING_OFFSETS` (`latest`), `SPARK_FORMAT_PROFILE`, `SPARK_CHECKPOINT_DIR`, `SPARK_SPIKE_OUTPUT_MODE` (`update` = alert as soon as a window crosses the threshold; `append` = once, after the watermark passes).
 - **Load test**: `uv run python scripts/load_test.py --rate 2000 --duration 30` sends synthetic logs (fake PII) to `logs-raw` and reads the Spark UI until the `logs` query has processed them. It reports producer rate, end-to-end throughput and lag after the last send. Start it after the job is up: with `SPARK_STARTING_OFFSETS=latest` a fresh job skips logs sent before its first batch. `--delta <host path>` also counts this run's rows in the table when `SPARK_DELTA_PATH` is on the host.
+
+---
+
+## Backup and restore (local, no cloud account)
+
+State lives in files under `./data` (Delta Lake, Chroma, SQLite) and in the `spark-data` Docker volume. `scripts/backup.py` copies it to a folder or to any [rclone](https://rclone.org/install/) remote, such as an external drive or the free tiers of Cloudflare R2 or Backblaze B2:
+
+```powershell
+uv run python scripts/backup.py --dest D:\backups\gla            # a local folder
+uv run python scripts/backup.py --dest r2:my-bucket/gla          # an rclone remote (run `rclone config` once)
+uv run python scripts/backup.py --dest D:\backups\gla --dry-run  # print the plan, copy nothing
+```
+
+- **SQLite files** (incidents, API keys, learned PII and PII rules) are copied with SQLite's online backup API, so a file in use is captured consistently. A plain `cp` of a live SQLite file can be corrupt.
+- **Delta tables** are copied data files first and `_delta_log` last, so the copy never lists a file it lacks.
+- **Chroma** is copied as-is. Its index files cannot be snapshotted safely while the api writes, so stop the api first for a consistent copy (`--skip-chroma` leaves it out).
+- **The Spark table** is in a named volume, not under `./data`. Export it to a host folder, then pass it with `--extra spark=<folder>`: `docker run --rm -v <project>_spark-data:/src -v ${PWD}/spark-export:/dst alpine cp -a /src/. /dst` (find the volume name with `docker volume ls`).
+- **Schedule it** with Windows Task Scheduler or cron. The recovery point is the time since the last run.
+- **Restore**: stop the stack, copy the folders back to the same paths (`sqlite/*.sqlite3` to the paths in `INCIDENTS_DB`, `API_KEYS_DB`, `PII_LEARNED_DB`), and start it again. A full restore from a remote has not been rehearsed; the unit tests cover the SQLite snapshot and the order of the rclone commands, not a real transfer.
+- **Litestream** (continuous SQLite replication) is not set up. It needs WAL mode, and only the learned-PII and PII-rules files use it; `incidents.sqlite3` and `api_keys.sqlite3` use SQLite's default journal.
 
 ---
 
@@ -451,11 +473,12 @@ Entirely local, no cloud cost.
 ## Testing
 Run the pytest suite (needs `uv sync --extra dev`):
 ```powershell
-uv run pytest test_api_endpoints.py test_audit.py test_redactor.py test_error_spike.py -q
+uv run pytest test_api_endpoints.py test_audit.py test_redactor.py test_error_spike.py test_auth_rate_limit.py test_format_profiles.py -q
 ```
 
 Notes:
-- CI runs this same command.
+- CI runs this same command, then `uv run python scripts/eval_triage.py --retrieval-only --min-pass 1.0`: no LLM and no key, it checks that each case in `scripts/eval_triage_cases.yaml` retrieves its expected runbook. The full eval (answer grounding) needs `GEMINI_API_KEY` and is not run in CI.
+- `test_api_endpoints.py` also covers `gemini_triage` with a fake Gemini client (prompt contents, whitelisted incident fields, references, failure), the analyzer runner when a key is missing, `LogConsumer` and `KafkaConnector` with fake aiokafka objects (decoding, commit only after the batch is stored, rewind on failure, reconnect backoff), `/query` latency percentiles, and the backup script.
 - `test_error_spike.py` covers the detector (it used to stop after its first incident) and triage: grouping, routing, severity factors, late deployment correlation, and feedback.
 - `test_api_endpoints.py` also covers the ticket dispatcher (threshold, retry after failure, update, resolve), webhook HMAC signing, and batched IP enrichment, all with fakes and no network calls.
 - Without the spaCy model, the redactor tests run in rules-only mode.

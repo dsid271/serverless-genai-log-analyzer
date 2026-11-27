@@ -1,10 +1,14 @@
 from fastapi import FastAPI, Request, Depends, Response, HTTPException
 from api.orchestrator import SystemOrchestrator
 from pydantic import BaseModel, Field
-from typing import Literal, List, Dict, Any, Optional
+from typing import Literal, List, Dict, Any, Optional, Union
+import asyncio
 import json
 import os
+import re
 import time
+import zlib
+import pandas as pd
 import logging
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
@@ -31,6 +35,7 @@ from api.audit import audit_logger
 from api.metrics import record_ingestion, record_pii_rule_counts, render_latest
 from fastapi.responses import FileResponse
 from processing.format_profiles import DEFAULT_PROFILE, get_normalizer
+from processing.otlp import OtlpError, flatten_otlp_logs
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -341,6 +346,60 @@ async def ingest_logs(request: Request, body: LogIngestRequest, user: User = Dep
     record_ingestion(channel="api", sources=[log.get("source") for log in logs], contains_pii=contains_pii)
     return response
 
+_OTLP_MAX_BYTES = 10 * 1024 * 1024
+
+async def _otlp_json_body(request: Request) -> Any:
+    """Decoded JSON body of an OTLP/HTTP request (plain or gzip), capped at _OTLP_MAX_BYTES."""
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if content_type != "application/json":
+        raise HTTPException(
+            status_code=415,
+            detail="Only OTLP/HTTP JSON is supported. Set OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/json.",
+        )
+    raw = await request.body()
+    encoding = request.headers.get("content-encoding", "identity").strip().lower()
+    if encoding == "gzip":
+        inflater = zlib.decompressobj(wbits=31)
+        try:
+            raw = inflater.decompress(raw, _OTLP_MAX_BYTES)
+        except zlib.error:
+            raise HTTPException(status_code=400, detail="Invalid gzip body.")
+        if inflater.unconsumed_tail:
+            raise HTTPException(status_code=413, detail="Decompressed body is too large.")
+    elif encoding != "identity":
+        raise HTTPException(status_code=415, detail=f"Unsupported Content-Encoding {encoding!r}.")
+    if len(raw) > _OTLP_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Body is too large.")
+    try:
+        return json.loads(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Body is not valid JSON.")
+
+@app.post("/v1/logs", tags=["Ingestion"])
+@limiter.limit(rate_limit_ingest)
+async def ingest_otlp_logs(request: Request, user: User = Depends(require_scope("logs:ingest"))):
+    """OTLP/HTTP JSON logs endpoint: point an OpenTelemetry log exporter here.
+
+    Needs http/json (not protobuf). Records are flattened and mapped with the `otlp`
+    profile in processing/format_profiles.yaml, then follow the same path as /ingest.
+    Trace ids are kept as `trace_id`; only logs are accepted, not spans or metrics."""
+    try:
+        flat = flatten_otlp_logs(await _otlp_json_body(request))
+    except OtlpError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    normalizer = get_normalizer()
+    if not normalizer.has("otlp"):
+        raise HTTPException(status_code=503, detail="The 'otlp' format profile is missing from the format profiles file.")
+    logs = normalizer.normalize_batch(flat, "otlp")
+    response = await orchestrator.ingest_logs(logs)
+    request.state.results_count = response.get("count", 0)
+    contains_pii = bool(response.get("contains_pii", False))
+    request.state.pii_accessed = contains_pii
+    request.state.contains_pii = contains_pii
+    record_ingestion(channel="otlp", sources=[log.get("source") for log in logs], contains_pii=contains_pii)
+    # An empty object is a full success in OTLP/HTTP.
+    return {}
+
 @app.post("/analyze", tags=["Analysis"])
 @limiter.limit(rate_limit_analyze)
 async def analyze_logs(request: Request, body: AnalysisRequest, user: User = Depends(require_scope("analyze:run"))):
@@ -540,6 +599,42 @@ async def search_logs(request: Request, body: SearchRequest, user: User = Depend
     results = orchestrator.search(body.query, body.limit, body.filters)
     request.state.results_count = len(results)
     return {"results": results, "count": len(results)}
+
+_FIELD = r"^[A-Za-z0-9_.@-]{1,100}$"
+FilterValue = Union[str, int, float, bool]
+
+class QueryRequest(BaseModel):
+    # Exact match per field; a list matches any of its values. Values compare as strings.
+    filters: Dict[str, Union[FilterValue, List[FilterValue]]] = Field(default_factory=dict, max_length=20)
+    group_by: List[str] = Field(default_factory=list, max_length=5)
+    # Numeric field (e.g. http_duration_ms): adds avg/p50/p95/p99/max per row.
+    metric: Optional[str] = Field(default=None, max_length=100)
+    last_minutes: Optional[int] = Field(default=None, gt=0, le=525600)
+    start: Optional[datetime] = None
+    end: Optional[datetime] = None
+    limit: int = Field(default=100, gt=0, le=1000)
+
+@app.post("/query", tags=["Search"])
+@limiter.limit(rate_limit_default)
+async def query_logs(request: Request, body: QueryRequest, user: User = Depends(require_scope("logs:search"))):
+    """Exact counts over stored logs (API and Spark tables), e.g. 500s by customer_id in the last 15 minutes."""
+    bad = [f for f in [*body.filters, *body.group_by, *([body.metric] if body.metric else [])] if not re.match(_FIELD, f)]
+    if bad:
+        raise HTTPException(status_code=400, detail=f"Invalid field names: {bad}")
+    if body.last_minutes is not None and body.start is not None:
+        raise HTTPException(status_code=400, detail="Use either last_minutes or start, not both.")
+    start = pd.Timestamp(body.start) if body.start is not None else None
+    if body.last_minutes is not None:
+        start = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=body.last_minutes)
+    end = pd.Timestamp(body.end) if body.end is not None else None
+    start = start.tz_localize("UTC") if start is not None and start.tzinfo is None else start
+    end = end.tz_localize("UTC") if end is not None and end.tzinfo is None else end
+    request.state.audit_detail = _audit_text(json.dumps(body.model_dump(mode="json"), sort_keys=True))
+    result = await asyncio.to_thread(
+        orchestrator.storage.aggregate, body.filters, body.group_by, start, end, body.limit, body.metric
+    )
+    request.state.results_count = len(result["rows"])
+    return result
 
 @app.get("/summary", tags=["Summary"])
 @limiter.limit(rate_limit_default)

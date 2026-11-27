@@ -18,7 +18,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-CANONICAL = ("timestamp", "severity", "source", "message")
+CANONICAL = ("timestamp", "severity", "source", "message", "trace_id")
 DEFAULT_PROFILE = "generic"
 _DEFAULT_PATH = os.path.join(os.path.dirname(__file__), "format_profiles.yaml")
 
